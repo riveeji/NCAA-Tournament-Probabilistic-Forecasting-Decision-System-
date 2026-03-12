@@ -61,6 +61,8 @@ CALIBRATION_MIN_ROWS = 300
 MODEL_LIMIT = {"M": 4, "W": 3}
 LR_C = {"M": 0.9, "W": 0.3}
 MARGIN_TO_PROB_SCALE = {"M": 10.0, "W": 9.0}
+MARGIN_CAUCHY_SCALE = {"M": 11.0, "W": 9.0}
+CAUCHY_HESSIAN_FLOOR = 1e-6
 SHRINKAGE_GRID = (0.0, 0.03, 0.06, 0.10)
 TOSSUP_GATE_MODES = ("prob_only", "seed_only", "seed_and_prob")
 TOSSUP_SEED_THRESHOLDS = (2, 4, 6)
@@ -70,6 +72,12 @@ TOSSUP_MIN_ROWS = 180
 TOSSUP_MIN_EVAL_GATE_ROWS = 50
 MOE_SEED_THRESHOLDS = (3, 4, 6)
 MOE_FAVORITE_THRESHOLDS = (0.60, 0.66, 0.72)
+ADAPTIVE_MARKET_BASE_WEIGHTS = (0.10, 0.14, 0.18, 0.22, 0.26)
+ADAPTIVE_MARKET_CLOSE_THRESHOLDS = (2, 4, 6)
+ADAPTIVE_MARKET_WIDE_THRESHOLDS = (6, 8, 10)
+ADAPTIVE_MARKET_CLOSE_WEIGHTS = (0.22, 0.30, 0.38, 0.46)
+ADAPTIVE_MARKET_WIDE_WEIGHTS = (0.00, 0.04, 0.08, 0.12)
+ADAPTIVE_MARKET_MIN_ROWS = 120
 CHALK_MIN_ROWS = 260
 ODDS_KEYWORDS = ("odds", "market", "vegas", "sportsbook", "spread")
 SIGNAL_KEYWORDS = ("manual", "signal")
@@ -1037,6 +1045,46 @@ def make_xgb_margin(gender: str):
     )
 
 
+def make_cauchy_objective(scale: float):
+    scale_sq = float(scale) ** 2
+
+    def objective(y_true, y_pred, sample_weight=None):
+        residual = np.asarray(y_pred, dtype=float) - np.asarray(y_true, dtype=float)
+        denom = scale_sq + residual**2
+        grad = 2.0 * residual / denom
+        hess = 2.0 * (scale_sq - residual**2) / (denom**2)
+        hess = np.maximum(hess, CAUCHY_HESSIAN_FLOOR)
+        if sample_weight is not None:
+            weights = np.asarray(sample_weight, dtype=float)
+            grad = grad * weights
+            hess = hess * weights
+        return grad, hess
+
+    return objective
+
+
+def make_xgb_margin_cauchy(gender: str):
+    if xgb is None:
+        return None
+    max_depth = 4 if gender == "M" else 3
+    n_estimators = 620 if gender == "M" else 420
+    return xgb.XGBRegressor(
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        learning_rate=0.03,
+        subsample=0.82,
+        colsample_bytree=0.78,
+        min_child_weight=4,
+        gamma=0.08,
+        reg_alpha=0.08,
+        reg_lambda=1.2,
+        objective=make_cauchy_objective(MARGIN_CAUCHY_SCALE[gender]),
+        eval_metric="mae",
+        random_state=42,
+        tree_method="hist",
+    )
+
+
 def make_lgbm(gender: str):
     if lgb is None:
         return None
@@ -1100,7 +1148,7 @@ def is_market_residual_model(name: str) -> bool:
 
 
 def is_margin_model(name: str) -> bool:
-    return name.endswith("_margin")
+    return "_margin" in name
 
 
 def margin_to_prob(margin: np.ndarray, gender: str) -> np.ndarray:
@@ -1123,6 +1171,7 @@ def available_model_specs(gender: str, enable_market_residual: bool = False) -> 
         specs.append(ModelSpec("xgb", "all"))
         specs.append(ModelSpec("xgb_mse", "all"))
         specs.append(ModelSpec("xgb_margin", "all"))
+        specs.append(ModelSpec("xgb_margin_cauchy", "all"))
         if enable_market_residual:
             specs.append(ModelSpec("xgb_market_resid", "all"))
     if lgb is not None:
@@ -1150,6 +1199,8 @@ def build_model(name: str, gender: str):
         return make_xgb_mse(gender)
     if name == "xgb_margin":
         return make_xgb_margin(gender)
+    if name == "xgb_margin_cauchy":
+        return make_xgb_margin_cauchy(gender)
     if name == "xgb_market_resid":
         return make_xgb_mse(gender)
     if name == "lgbm":
@@ -1494,6 +1545,16 @@ def build_strategy_oof_predictions(
     if not rows:
         return pd.DataFrame(columns=["Season", "Label", "RawProb", "FinalProb", "FavoriteProb"])
     return pd.concat(rows, ignore_index=True)
+
+
+def replace_strategy_final_prob(strategy_df: pd.DataFrame, scored_df: pd.DataFrame, pred: np.ndarray) -> pd.DataFrame:
+    keys = ["Season", "T1", "T2", "Label"]
+    pred_frame = scored_df[keys].copy()
+    pred_frame["FinalProb"] = safe_clip(pred)
+    base = strategy_df.drop(columns=["FinalProb", "FavoriteProb"], errors="ignore")
+    frame = base.merge(pred_frame, on=keys, how="left")
+    frame["FavoriteProb"] = np.maximum(frame["FinalProb"], 1.0 - frame["FinalProb"])
+    return frame
 
 
 def make_tossup_lr_pipeline() -> Pipeline:
@@ -1972,6 +2033,210 @@ def apply_moe_routing(bundle: dict[str, object], pred_df: pd.DataFrame, prob: np
     return safe_clip(adjusted)
 
 
+def build_tossup_specialist_oof(
+    matchups: pd.DataFrame,
+    strategy_oof: pd.DataFrame,
+    specialist: dict[str, object],
+) -> pd.DataFrame:
+    specialist_df = matchups.merge(
+        strategy_oof[[column for column in strategy_oof.columns if column in {"Season", "T1", "T2", "Label", "RawProb", "FinalProb", "FavoriteProb"}]],
+        on=["Season", "T1", "T2", "Label"],
+        how="inner",
+    )
+    if specialist_df.empty:
+        return strategy_oof
+
+    specialist_df = add_base_probability_features(specialist_df, specialist_df["FinalProb"].to_numpy())
+    rows = []
+    for season in sorted(specialist_df["Season"].unique()):
+        train_df = specialist_df[specialist_df["Season"] < season].copy()
+        test_df = specialist_df[specialist_df["Season"] == season].copy()
+        if test_df.empty:
+            continue
+
+        pred = test_df["FinalProb"].to_numpy().copy()
+        if len(train_df["Season"].unique()) >= MIN_TRAIN_SEASONS:
+            train_gate = tossup_gate_mask(train_df, specialist["mode"], specialist["seed_threshold"], specialist["favorite_threshold"])
+            models = fit_tossup_specialist_models(train_df.loc[train_gate], specialist["feature_cols"])
+            test_gate = tossup_gate_mask(test_df, specialist["mode"], specialist["seed_threshold"], specialist["favorite_threshold"]).to_numpy()
+            if models is not None and test_gate.any():
+                specialist_pred = predict_tossup_specialist_models(models, test_df.loc[test_gate])
+                pred[test_gate] = safe_clip(
+                    (1.0 - specialist["blend_weight"]) * pred[test_gate] + specialist["blend_weight"] * specialist_pred
+                )
+
+        season_strategy = strategy_oof[strategy_oof["Season"] == season].copy()
+        rows.append(replace_strategy_final_prob(season_strategy, test_df, pred))
+
+    if not rows:
+        return strategy_oof
+    return pd.concat(rows, ignore_index=True)
+
+
+def build_moe_routing_oof(
+    matchups: pd.DataFrame,
+    strategy_oof: pd.DataFrame,
+    moe: dict[str, object],
+) -> pd.DataFrame:
+    moe_df = matchups.merge(
+        strategy_oof[[column for column in strategy_oof.columns if column in {"Season", "T1", "T2", "Label", "RawProb", "FinalProb", "FavoriteProb"}]],
+        on=["Season", "T1", "T2", "Label"],
+        how="inner",
+    )
+    if moe_df.empty:
+        return strategy_oof
+
+    moe_df = add_base_probability_features(moe_df, moe_df["FinalProb"].to_numpy())
+    rows = []
+    for season in sorted(moe_df["Season"].unique()):
+        train_df = moe_df[moe_df["Season"] < season].copy()
+        test_df = moe_df[moe_df["Season"] == season].copy()
+        if test_df.empty:
+            continue
+
+        pred = test_df["FinalProb"].to_numpy().copy()
+        if len(train_df["Season"].unique()) >= MIN_TRAIN_SEASONS:
+            toss_train_mask = tossup_gate_mask(train_df, "seed_and_prob", moe["seed_threshold"], moe["favorite_threshold"])
+            toss_bundle = fit_expert_models(train_df.loc[toss_train_mask], moe["tossup_feature_cols"], expert_type="tossup")
+            chalk_bundle = fit_expert_models(train_df.loc[~toss_train_mask], moe["chalk_feature_cols"], expert_type="chalk")
+            if toss_bundle is not None and chalk_bundle is not None:
+                toss_test_mask = tossup_gate_mask(test_df, "seed_and_prob", moe["seed_threshold"], moe["favorite_threshold"]).to_numpy()
+                if toss_test_mask.any():
+                    pred[toss_test_mask] = predict_expert_models(toss_bundle, test_df.loc[toss_test_mask])
+                if (~toss_test_mask).any():
+                    pred[~toss_test_mask] = predict_expert_models(chalk_bundle, test_df.loc[~toss_test_mask])
+
+        season_strategy = strategy_oof[strategy_oof["Season"] == season].copy()
+        rows.append(replace_strategy_final_prob(season_strategy, test_df, pred))
+
+    if not rows:
+        return strategy_oof
+    return pd.concat(rows, ignore_index=True)
+
+
+def adaptive_market_row_weights(df: pd.DataFrame, config: dict[str, object]) -> np.ndarray:
+    row_weights = np.full(len(df), float(config["base_weight"]), dtype=float)
+    if "AbsSeedDiff" not in df.columns:
+        return np.clip(row_weights, 0.0, 0.70)
+
+    abs_seed = pd.to_numeric(df["AbsSeedDiff"], errors="coerce").fillna(np.inf).to_numpy()
+    row_weights[abs_seed <= int(config["close_seed_threshold"])] = float(config["close_weight"])
+    row_weights[abs_seed >= int(config["wide_seed_threshold"])] = float(config["wide_weight"])
+    return np.clip(row_weights, 0.0, 0.70)
+
+
+def evaluate_adaptive_market_blend(
+    matchups: pd.DataFrame,
+    strategy_oof: pd.DataFrame,
+    eval_years: int,
+    base_best_cv: float,
+) -> Optional[dict[str, object]]:
+    if strategy_oof.empty or "MarketProb" not in matchups.columns:
+        return None
+
+    merged = matchups.merge(
+        strategy_oof[[column for column in strategy_oof.columns if column in {"Season", "T1", "T2", "Label", "RawProb", "FinalProb", "FavoriteProb"}]],
+        on=["Season", "T1", "T2", "Label"],
+        how="inner",
+    )
+    if merged.empty or merged["MarketProb"].notna().sum() < ADAPTIVE_MARKET_MIN_ROWS:
+        return None
+
+    eval_seasons = sorted(merged["Season"].unique())[-eval_years:]
+    grid_scores: dict[str, float] = {}
+    config_by_key: dict[str, dict[str, object]] = {}
+
+    for base_weight in ADAPTIVE_MARKET_BASE_WEIGHTS:
+        for close_seed_threshold in ADAPTIVE_MARKET_CLOSE_THRESHOLDS:
+            for wide_seed_threshold in ADAPTIVE_MARKET_WIDE_THRESHOLDS:
+                if close_seed_threshold >= wide_seed_threshold:
+                    continue
+                for close_weight in ADAPTIVE_MARKET_CLOSE_WEIGHTS:
+                    if close_weight < base_weight:
+                        continue
+                    for wide_weight in ADAPTIVE_MARKET_WIDE_WEIGHTS:
+                        if wide_weight > base_weight:
+                            continue
+                        config = {
+                            "base_weight": base_weight,
+                            "close_seed_threshold": close_seed_threshold,
+                            "wide_seed_threshold": wide_seed_threshold,
+                            "close_weight": close_weight,
+                            "wide_weight": wide_weight,
+                        }
+                        scores = []
+                        active_rows_total = 0
+                        for season in eval_seasons:
+                            test_df = merged[merged["Season"] == season].copy()
+                            if test_df.empty:
+                                continue
+
+                            pred = test_df["FinalProb"].to_numpy().copy()
+                            row_weights = adaptive_market_row_weights(test_df, config)
+                            market_mask = test_df["MarketProb"].notna().to_numpy()
+                            active = market_mask & (row_weights > 0)
+                            active_rows_total += int(active.sum())
+                            if active.any():
+                                market_prob = safe_clip(test_df.loc[active, "MarketProb"].to_numpy())
+                                pred[active] = safe_clip(
+                                    (1.0 - row_weights[active]) * pred[active] + row_weights[active] * market_prob
+                                )
+                            scores.append(brier_score_loss(test_df["Label"], pred))
+
+                        if scores and active_rows_total >= ADAPTIVE_MARKET_MIN_ROWS:
+                            key = json.dumps(config, sort_keys=True)
+                            grid_scores[key] = float(np.mean(scores))
+                            config_by_key[key] = config
+
+    if not grid_scores:
+        return None
+
+    best_key = min(grid_scores, key=grid_scores.get)
+    best_score = grid_scores[best_key]
+    if best_score >= base_best_cv - 0.00005:
+        return None
+
+    best_config = dict(config_by_key[best_key])
+    best_config["best_cv_brier"] = best_score
+    best_config["grid_scores"] = grid_scores
+    return best_config
+
+
+def build_adaptive_market_blend_oof(
+    matchups: pd.DataFrame,
+    strategy_oof: pd.DataFrame,
+    adaptive_market_blend: dict[str, object],
+) -> pd.DataFrame:
+    merged = matchups.merge(
+        strategy_oof[[column for column in strategy_oof.columns if column in {"Season", "T1", "T2", "Label", "RawProb", "FinalProb", "FavoriteProb"}]],
+        on=["Season", "T1", "T2", "Label"],
+        how="inner",
+    )
+    if merged.empty:
+        return strategy_oof
+
+    rows = []
+    for season in sorted(merged["Season"].unique()):
+        test_df = merged[merged["Season"] == season].copy()
+        if test_df.empty:
+            continue
+
+        pred = test_df["FinalProb"].to_numpy().copy()
+        row_weights = adaptive_market_row_weights(test_df, adaptive_market_blend)
+        market_mask = test_df["MarketProb"].notna().to_numpy()
+        active = market_mask & (row_weights > 0)
+        if active.any():
+            market_prob = safe_clip(test_df.loc[active, "MarketProb"].to_numpy())
+            pred[active] = safe_clip((1.0 - row_weights[active]) * pred[active] + row_weights[active] * market_prob)
+
+        season_strategy = strategy_oof[strategy_oof["Season"] == season].copy()
+        rows.append(replace_strategy_final_prob(season_strategy, test_df, pred))
+
+    if not rows:
+        return strategy_oof
+    return pd.concat(rows, ignore_index=True)
+
+
 def calibration_bin_report(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=["ProbType", "BinLow", "BinHigh", "Count", "PredMean", "ActualRate", "Brier", "CalibrationGap"])
@@ -2190,6 +2455,9 @@ def append_benchmark(run_id: str, bundle: dict[str, object], matchups: pd.DataFr
                 "HasMoERouting": bool(bundle.get("moe_routing")),
                 "MoERoutingCV": bundle.get("moe_routing_best_cv"),
                 "MoERoutingConfig": json.dumps(bundle.get("moe_routing_config", {}), sort_keys=True),
+                "HasAdaptiveMarketBlend": bool(bundle.get("adaptive_market_blend")),
+                "AdaptiveMarketBlendCV": bundle.get("adaptive_market_blend_best_cv"),
+                "AdaptiveMarketBlendConfig": json.dumps(bundle.get("adaptive_market_blend_config", {}), sort_keys=True),
                 "HasFieldLiveReweight": bool(bundle.get("field_reweight_info", {}).get("enabled")),
                 "FieldLiveReweightSeason": bundle.get("field_reweight_info", {}).get("target_season"),
                 "FieldLiveReweightFeatureCount": len(bundle.get("field_reweight_info", {}).get("used_features", [])),
@@ -2304,6 +2572,7 @@ def train_and_evaluate(
     moe_routing = None
     strategy_oof = None
     market_residual_overlay = None
+    adaptive_market_blend = None
     if gender == "M":
         strategy_oof = build_strategy_oof_predictions(oof_selected, selected_raw_column, calibration_method, shrinkage, eval_years=None)
         market_residual_overlay = evaluate_market_residual_overlay(
@@ -2327,13 +2596,27 @@ def train_and_evaluate(
                 all_feats,
                 gender,
             )
-        tossup_specialist = evaluate_tossup_specialist(matchups, strategy_oof, eval_years=eval_years, base_best_cv=best_cv)
+        post_overlay_strategy_oof = strategy_oof.copy()
+        tossup_specialist = evaluate_tossup_specialist(matchups, post_overlay_strategy_oof, eval_years=eval_years, base_best_cv=best_cv)
         if tossup_specialist is not None:
             best_cv = float(tossup_specialist["best_cv_brier"])
-        moe_routing = evaluate_moe_routing(matchups, strategy_oof, eval_years=eval_years, base_best_cv=best_cv)
+        moe_routing = evaluate_moe_routing(matchups, post_overlay_strategy_oof, eval_years=eval_years, base_best_cv=best_cv)
         if moe_routing is not None:
             best_cv = float(moe_routing["best_cv_brier"])
             tossup_specialist = None
+            strategy_oof = build_moe_routing_oof(matchups, post_overlay_strategy_oof, moe_routing)
+        elif tossup_specialist is not None:
+            strategy_oof = build_tossup_specialist_oof(matchups, post_overlay_strategy_oof, tossup_specialist)
+
+        adaptive_market_blend = evaluate_adaptive_market_blend(
+            matchups,
+            strategy_oof,
+            eval_years=eval_years,
+            base_best_cv=best_cv,
+        )
+        if adaptive_market_blend is not None:
+            best_cv = float(adaptive_market_blend["best_cv_brier"])
+            strategy_oof = build_adaptive_market_blend_oof(matchups, strategy_oof, adaptive_market_blend)
 
     print(f"Training samples: {len(matchups)}")
     print(f"Elo params: {elo_params}")
@@ -2385,6 +2668,14 @@ def train_and_evaluate(
             f"seed<={moe_routing['seed_threshold']} "
             f"fav<={moe_routing['favorite_threshold']:.2f} "
             f"-> {moe_routing['best_cv_brier']:.5f}"
+        )
+    if adaptive_market_blend is not None:
+        print(
+            "Adaptive market blend: "
+            f"base={adaptive_market_blend['base_weight']:.2f} "
+            f"close(seed<={adaptive_market_blend['close_seed_threshold']})={adaptive_market_blend['close_weight']:.2f} "
+            f"wide(seed>={adaptive_market_blend['wide_seed_threshold']})={adaptive_market_blend['wide_weight']:.2f} "
+            f"-> {adaptive_market_blend['best_cv_brier']:.5f}"
         )
 
     coef_model_name = "lr_core" if "lr_core" in final_models else ("lr_plus" if "lr_plus" in final_models else None)
@@ -2459,6 +2750,12 @@ def train_and_evaluate(
         "moe_routing_config": {} if moe_routing is None else {
             key: moe_routing[key]
             for key in ["mode", "seed_threshold", "favorite_threshold"]
+        },
+        "adaptive_market_blend": adaptive_market_blend,
+        "adaptive_market_blend_best_cv": None if adaptive_market_blend is None else adaptive_market_blend["best_cv_brier"],
+        "adaptive_market_blend_config": {} if adaptive_market_blend is None else {
+            key: adaptive_market_blend[key]
+            for key in ["base_weight", "close_seed_threshold", "close_weight", "wide_seed_threshold", "wide_weight"]
         },
     }
     append_benchmark(run_id, bundle, matchups)
@@ -2538,11 +2835,15 @@ def postprocess_predictions(bundle: dict[str, object], pred_df: pd.DataFrame, pr
             adjusted = apply_logit_shift(adjusted, ext_shift)
 
     if "MarketProb" in pred_df.columns:
+        adaptive_market_blend = bundle.get("adaptive_market_blend")
         market_weight = float(config["market_blend_weight"].get(gender, 0.0))
         extra_weight = float(config.get("field_market_extra_weight", {}).get(gender, 0.0))
         market_mask = pred_df["MarketProb"].notna().to_numpy()
-        if market_weight > 0 and market_mask.any():
-            row_weights = np.full(len(pred_df), market_weight, dtype=float)
+        if market_mask.any():
+            if adaptive_market_blend:
+                row_weights = adaptive_market_row_weights(pred_df, adaptive_market_blend)
+            else:
+                row_weights = np.full(len(pred_df), market_weight, dtype=float)
             official_field_ids = bundle.get("field_context", {}).get("field_team_ids", {}).get(2026, set())
             if extra_weight > 0 and official_field_ids:
                 field_mask = official_field_matchup_mask(pred_df, official_field_ids, season=2026)
