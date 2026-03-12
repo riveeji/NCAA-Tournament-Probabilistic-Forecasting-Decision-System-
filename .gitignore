@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+
+external-data/
+ncaa-data/
+
+results/*
+!results/combined_cv_summary_20260312T115339Z.json
+
+submission_stage1.csv
+submission_stage2.csv
+submission_stage2_single_final.csv

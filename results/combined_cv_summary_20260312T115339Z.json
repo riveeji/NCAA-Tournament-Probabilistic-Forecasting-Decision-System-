@@ -1,0 +1,8 @@
+{
+  "men_brier": 0.18801117917279417,
+  "women_brier": 0.13902863035611718,
+  "equal_gender_mean": 0.16351990476445566,
+  "historical_matchup_weighted": 0.1684614264256453,
+  "men_matchups": 2585,
+  "women_matchups": 1717
+}

@@ -1,0 +1,13 @@
+numpy
+pandas
+scikit-learn
+xgboost
+lightgbm
+catboost
+requests
+beautifulsoup4
+html5lib
+lxml
+playwright
+rapidfuzz
+optuna
