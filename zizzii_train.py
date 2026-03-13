@@ -108,6 +108,7 @@ DEFAULT_EXTERNAL_CONFIG = {
 MARKET_RESIDUAL_MIN_ROWS = 250
 MARKET_RESIDUAL_SELECTION_MIN_COVERAGE = 0.85
 MARKET_RESIDUAL_MIN_EVAL_SEASONS = 4
+MARKET_RESIDUAL_ACTIVE_START_SEASON = 2015
 MARKET_RESIDUAL_OVERLAY_MODELS = ("histgb_market_resid", "xgb_market_resid", "lgbm_market_resid")
 MARKET_RESIDUAL_OVERLAY_BLEND_WEIGHTS = (0.35, 0.50, 0.65, 0.80, 1.00)
 MARKET_RESIDUAL_OVERLAY_MIN_EVAL_ROWS = 60
@@ -709,6 +710,60 @@ def market_coverage_by_season(df: pd.DataFrame) -> dict[int, float]:
     return {int(season): float(value) for season, value in coverage.items()}
 
 
+def market_residual_active_seasons(
+    coverage_by_season: dict[int, float],
+    min_coverage: float,
+    start_season: int = MARKET_RESIDUAL_ACTIVE_START_SEASON,
+) -> list[int]:
+    return sorted(
+        int(season)
+        for season, coverage in coverage_by_season.items()
+        if int(season) >= int(start_season) and float(coverage) >= float(min_coverage)
+    )
+
+
+def market_residual_active_mask(
+    df: pd.DataFrame,
+    active_seasons: list[int] | set[int],
+    require_market_prob: bool = True,
+) -> np.ndarray:
+    if df.empty or "Season" not in df.columns:
+        return np.zeros(len(df), dtype=bool)
+    active_set = {int(season) for season in active_seasons}
+    season_values = pd.to_numeric(df["Season"], errors="coerce").fillna(-1).astype(int)
+    mask = np.asarray(season_values.isin(active_set).to_numpy(), dtype=bool).copy()
+    if require_market_prob and "MarketProb" in df.columns:
+        mask &= pd.to_numeric(df["MarketProb"], errors="coerce").notna().to_numpy()
+    return mask
+
+
+def market_residual_train_mask(
+    df: pd.DataFrame,
+    start_season: int = MARKET_RESIDUAL_ACTIVE_START_SEASON,
+) -> np.ndarray:
+    if df.empty or "Season" not in df.columns:
+        return np.zeros(len(df), dtype=bool)
+    return pd.to_numeric(df["Season"], errors="coerce").fillna(-1).astype(int).ge(int(start_season)).to_numpy()
+
+
+def subset_sample_weight(
+    sample_weight: Optional[pd.Series | np.ndarray],
+    base_index: pd.Index,
+    subset_index: pd.Index,
+) -> Optional[pd.Series | np.ndarray]:
+    if sample_weight is None:
+        return None
+    if isinstance(sample_weight, pd.Series):
+        return sample_weight.loc[subset_index]
+    array = np.asarray(sample_weight, dtype=float)
+    if len(array) != len(base_index):
+        return array
+    positions = pd.Index(base_index).get_indexer(subset_index)
+    if (positions < 0).any():
+        return array
+    return array[positions]
+
+
 def recent_market_residual_ready(
     matchups: pd.DataFrame,
     eval_years: int,
@@ -718,20 +773,23 @@ def recent_market_residual_ready(
     if matchups.empty or "MarketProb" not in matchups.columns:
         return False, {
             "coverage_by_season": {},
+            "active_seasons": [],
             "eligible_eval_seasons": [],
             "matched_rows_in_eval_window": 0,
             "eval_window_seasons": [],
         }
 
     coverage_by_season = market_coverage_by_season(matchups)
+    active_seasons = market_residual_active_seasons(coverage_by_season, min_coverage)
     eval_seasons = sorted(int(season) for season in matchups["Season"].unique())[-eval_years:]
-    eligible_eval_seasons = [season for season in eval_seasons if coverage_by_season.get(season, 0.0) >= float(min_coverage)]
+    eligible_eval_seasons = [season for season in eval_seasons if season in active_seasons]
     matched_rows_in_eval_window = int(
         matchups.loc[matchups["Season"].isin(eligible_eval_seasons), "MarketProb"].notna().sum()
     )
     ready = len(eligible_eval_seasons) >= min(min_eval_seasons, len(eval_seasons)) and matched_rows_in_eval_window >= MARKET_RESIDUAL_MIN_ROWS
     return ready, {
         "coverage_by_season": coverage_by_season,
+        "active_seasons": active_seasons,
         "eligible_eval_seasons": eligible_eval_seasons,
         "matched_rows_in_eval_window": matched_rows_in_eval_window,
         "eval_window_seasons": eval_seasons,
@@ -1612,6 +1670,8 @@ def generate_base_oof(
     rows = []
     diag_columns = [column for column in ["AbsSeedDiff", "T1BetterSeed", "SameConference"] if column in matchups.columns]
     external_config = external_config or DEFAULT_EXTERNAL_CONFIG
+    residual_min_coverage = float(external_config.get("min_market_coverage_for_residual_models", MARKET_RESIDUAL_SELECTION_MIN_COVERAGE))
+    residual_active_seasons = set(market_residual_active_seasons(market_coverage_by_season(matchups), residual_min_coverage))
 
     for season in seasons:
         prior = [value for value in seasons if value < season]
@@ -1634,10 +1694,20 @@ def generate_base_oof(
         for column in diag_columns:
             row[f"Diag_{column}"] = test_df[column].values
         for spec in model_specs:
-            x_train = feature_frame(train_df, spec.feature_key, lr_core_feats, lr_plus_feats, all_feats, women_minimal_feats)
-            x_test = feature_frame(test_df, spec.feature_key, lr_core_feats, lr_plus_feats, all_feats, women_minimal_feats)
-            y_train = training_target_for_model(train_df, spec.name)
-            model = fit_model(spec.name, x_train, y_train, gender, sample_weight=sample_weight)
+            train_subset = train_df
+            test_subset = test_df
+            sample_weight_subset = sample_weight
+            if is_market_residual_model(spec.name):
+                train_mask = market_residual_train_mask(train_df)
+                train_subset = train_df.loc[train_mask].copy()
+                sample_weight_subset = subset_sample_weight(sample_weight, train_df.index, train_subset.index)
+                if int(season) not in residual_active_seasons:
+                    row[f"Prob_{spec.name}"] = np.full(len(test_df), np.nan, dtype=float)
+                    continue
+            x_train = feature_frame(train_subset, spec.feature_key, lr_core_feats, lr_plus_feats, all_feats, women_minimal_feats)
+            x_test = feature_frame(test_subset, spec.feature_key, lr_core_feats, lr_plus_feats, all_feats, women_minimal_feats)
+            y_train = training_target_for_model(train_subset, spec.name)
+            model = fit_model(spec.name, x_train, y_train, gender, sample_weight=sample_weight_subset)
             row[f"Prob_{spec.name}"] = predict_model(spec.name, model, x_test, gender)
         rows.append(pd.DataFrame(row))
 
@@ -2219,9 +2289,18 @@ def apply_market_residual_overlay(
     if bundle["gender"] != "M" or not overlay:
         return prob, np.zeros(len(pred_df), dtype=bool)
 
+    coverage_by_season = market_coverage_by_season(pred_df)
+    active_seasons = set(market_residual_active_seasons(
+        coverage_by_season,
+        float(bundle["external_config"].get("min_market_coverage_for_residual_models", MARKET_RESIDUAL_SELECTION_MIN_COVERAGE)),
+    ))
+    routing_mask = market_residual_active_mask(pred_df, active_seasons)
+    if not routing_mask.any():
+        return prob, np.zeros(len(pred_df), dtype=bool)
+
     x_test = feature_frame(pred_df, overlay["feature_key"], bundle["lr_core_feats"], bundle["lr_plus_feats"], bundle["all_feats"])
     overlay_prob = predict_model(overlay["model_name"], overlay["model"], x_test, bundle["gender"])
-    active_mask = np.isfinite(overlay_prob)
+    active_mask = routing_mask & np.isfinite(overlay_prob)
     if not active_mask.any():
         return prob, active_mask
 
@@ -3041,9 +3120,15 @@ def fit_full_models(
     models = {}
     for name in model_names:
         feature_key = feature_key_for_model(name)
-        x_train = feature_frame(matchups, feature_key, lr_core_feats, lr_plus_feats, all_feats, women_minimal_feats)
-        y_train = training_target_for_model(matchups, name)
-        models[name] = fit_model(name, x_train, y_train, gender, sample_weight=sample_weight)
+        train_subset = matchups
+        sample_weight_subset = sample_weight
+        if is_market_residual_model(name):
+            train_mask = market_residual_train_mask(matchups)
+            train_subset = matchups.loc[train_mask].copy()
+            sample_weight_subset = subset_sample_weight(sample_weight, matchups.index, train_subset.index)
+        x_train = feature_frame(train_subset, feature_key, lr_core_feats, lr_plus_feats, all_feats, women_minimal_feats)
+        y_train = training_target_for_model(train_subset, name)
+        models[name] = fit_model(name, x_train, y_train, gender, sample_weight=sample_weight_subset)
     return models
 
 
@@ -3060,12 +3145,17 @@ def base_probabilities(
     all_feats: list[str],
     women_minimal_feats: Optional[list[str]],
     gender: str,
+    market_residual_active_pred_seasons: Optional[list[int]] = None,
 ) -> pd.DataFrame:
     frame = pd.DataFrame(index=pred_df.index)
     for name, model in models.items():
         feature_key = feature_key_for_model(name)
         x_test = feature_frame(pred_df, feature_key, lr_core_feats, lr_plus_feats, all_feats, women_minimal_feats)
-        frame[f"Prob_{name}"] = predict_model(name, model, x_test, gender)
+        pred = predict_model(name, model, x_test, gender)
+        if is_market_residual_model(name):
+            active_mask = market_residual_active_mask(pred_df, market_residual_active_pred_seasons or [])
+            pred = np.where(active_mask, pred, np.nan)
+        frame[f"Prob_{name}"] = pred
     return add_gender_strategy_columns(frame, list(models.keys()), gender)
 
 
@@ -3177,6 +3267,7 @@ def train_and_evaluate(
     residual_enabled = False
     market_residual_info = {
         "coverage_by_season": {},
+        "active_seasons": [],
         "eligible_eval_seasons": [],
         "matched_rows_in_eval_window": 0,
         "eval_window_seasons": [],
@@ -3377,6 +3468,8 @@ def train_and_evaluate(
     )
     print(f"Market odds coverage: {market_coverage:.1%}")
     print(f"Market residual models enabled: {residual_enabled}")
+    if market_residual_info["active_seasons"]:
+        print(f"Market residual active seasons: {market_residual_info['active_seasons']}")
     if market_residual_info["eligible_eval_seasons"]:
         print(
             "Market residual eligible eval seasons: "
@@ -3641,6 +3734,11 @@ def postprocess_predictions(bundle: dict[str, object], pred_df: pd.DataFrame, pr
 
 
 def predict_bundle(bundle: dict[str, object], pred_df: pd.DataFrame) -> np.ndarray:
+    pred_market_coverage = market_coverage_by_season(pred_df)
+    pred_market_active_seasons = market_residual_active_seasons(
+        pred_market_coverage,
+        float(bundle["external_config"].get("min_market_coverage_for_residual_models", MARKET_RESIDUAL_SELECTION_MIN_COVERAGE)),
+    )
     base_df = base_probabilities(
         bundle["models"],
         pred_df,
@@ -3649,6 +3747,7 @@ def predict_bundle(bundle: dict[str, object], pred_df: pd.DataFrame) -> np.ndarr
         bundle["all_feats"],
         bundle.get("women_minimal_feats"),
         bundle["gender"],
+        market_residual_active_pred_seasons=pred_market_active_seasons,
     )
     prob = strategy_probabilities(bundle, base_df)
     prob, residual_overlay_mask = apply_market_residual_overlay(bundle, pred_df, prob)
