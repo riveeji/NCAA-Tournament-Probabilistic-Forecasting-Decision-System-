@@ -133,6 +133,30 @@ WOMEN_DUAL_CHALK_DOG_SEED_MIN = (14, 15, 16)
 WOMEN_DUAL_CHALK_MAX_ROUNDS = (1, 2)
 WOMEN_DUAL_CHALK_FLOOR_PROBS = (0.97, 0.985, 0.992, 0.997, 0.999)
 WOMEN_DUAL_CHALK_REQUIRE_HOST = (False, True)
+WOMEN_MINIMAL_FEATURE_PRIORITY = [
+    "D_SeedNum",
+    "AbsSeedDiff",
+    "T1BetterSeed",
+    "T1_SeedNum",
+    "T2_SeedNum",
+    "D_Elo",
+    "D_WinRate",
+    "D_AvgMargin",
+    "D_SOS",
+    "D_NetRtg_z",
+    "D_DefRtg_z",
+    "D_DR",
+    "D_RecentEffDR",
+    "D_Recent30EffDR",
+    "D_Recent30EffDefRtg_z",
+    "D_Recent30EffNetRtg_z",
+    "D_Last10WinRate",
+    "D_Last30WinRate",
+    "D_Top50Wins",
+    "D_ConfNonConfWinRate",
+    "D_ConfMeanElo",
+    "D_ExtCompositeStrength",
+]
 WOMEN_ROLLBACK_FEATURE_PREFIXES = (
     "AdjOffRtg",
     "AdjDefRtg",
@@ -394,6 +418,10 @@ def simplify_women_feature_lists(
     lr_plus_feats = [column for column in lr_plus_feats if keep_matchup(column)]
     all_feats = [column for column in all_feats if keep_matchup(column)]
     return feature_candidates, lr_core_feats, lr_plus_feats, all_feats
+
+
+def build_women_minimal_feature_list(df: pd.DataFrame) -> list[str]:
+    return [column for column in WOMEN_MINIMAL_FEATURE_PRIORITY if column in df.columns]
 
 
 def resolve_gender_override_list(external_config: dict, key: str, gender: str) -> list[str]:
@@ -1222,6 +1250,26 @@ def make_xgb(gender: str):
     )
 
 
+def make_xgb_w_minimal():
+    if xgb is None:
+        return None
+    return xgb.XGBClassifier(
+        n_estimators=280,
+        max_depth=2,
+        learning_rate=0.03,
+        subsample=0.90,
+        colsample_bytree=0.90,
+        min_child_weight=8,
+        gamma=0.10,
+        reg_alpha=0.20,
+        reg_lambda=2.50,
+        max_delta_step=1,
+        eval_metric="logloss",
+        random_state=42,
+        tree_method="hist",
+    )
+
+
 def make_xgb_mse(gender: str):
     if xgb is None:
         return None
@@ -1411,6 +1459,8 @@ def available_model_specs(gender: str, enable_market_residual: bool = False) -> 
     if enable_market_residual:
         specs.append(ModelSpec("histgb_market_resid", "all"))
     if xgb is not None:
+        if gender == "W":
+            specs.append(ModelSpec("xgb_w_minimal", "w_minimal"))
         specs.append(ModelSpec("xgb", "all"))
         specs.append(ModelSpec("xgb_mse", "all"))
         specs.append(ModelSpec("xgb_margin", "all"))
@@ -1437,6 +1487,8 @@ def build_model(name: str, gender: str):
         return make_histgb(gender)
     if name == "histgb_market_resid":
         return make_histgb_market_resid(gender)
+    if name == "xgb_w_minimal":
+        return make_xgb_w_minimal()
     if name == "xgb":
         return make_xgb(gender)
     if name == "xgb_mse":
@@ -1526,11 +1578,20 @@ def predict_model(name: str, model, x_test: pd.DataFrame, gender: str) -> np.nda
     return safe_clip(np.asarray(model.predict(x_test), dtype=float))
 
 
-def feature_frame(df: pd.DataFrame, feature_key: str, lr_core_feats: list[str], lr_plus_feats: list[str], all_feats: list[str]) -> pd.DataFrame:
+def feature_frame(
+    df: pd.DataFrame,
+    feature_key: str,
+    lr_core_feats: list[str],
+    lr_plus_feats: list[str],
+    all_feats: list[str],
+    women_minimal_feats: Optional[list[str]] = None,
+) -> pd.DataFrame:
     if feature_key == "lr":
         columns = lr_core_feats
     elif feature_key == "lr_plus":
         columns = lr_plus_feats
+    elif feature_key == "w_minimal":
+        columns = women_minimal_feats or lr_plus_feats
     else:
         columns = all_feats
     return df[columns].fillna(0.0)
@@ -1542,6 +1603,7 @@ def generate_base_oof(
     lr_core_feats: list[str],
     lr_plus_feats: list[str],
     all_feats: list[str],
+    women_minimal_feats: Optional[list[str]],
     gender: str,
     field_context: Optional[dict[str, object]] = None,
     external_config: Optional[dict] = None,
@@ -1572,8 +1634,8 @@ def generate_base_oof(
         for column in diag_columns:
             row[f"Diag_{column}"] = test_df[column].values
         for spec in model_specs:
-            x_train = feature_frame(train_df, spec.feature_key, lr_core_feats, lr_plus_feats, all_feats)
-            x_test = feature_frame(test_df, spec.feature_key, lr_core_feats, lr_plus_feats, all_feats)
+            x_train = feature_frame(train_df, spec.feature_key, lr_core_feats, lr_plus_feats, all_feats, women_minimal_feats)
+            x_test = feature_frame(test_df, spec.feature_key, lr_core_feats, lr_plus_feats, all_feats, women_minimal_feats)
             y_train = training_target_for_model(train_df, spec.name)
             model = fit_model(spec.name, x_train, y_train, gender, sample_weight=sample_weight)
             row[f"Prob_{spec.name}"] = predict_model(spec.name, model, x_test, gender)
@@ -1621,6 +1683,70 @@ def select_model_names(base_scores: dict[str, float], gender: str) -> list[str]:
     if "lr_core" in [name for name, _ in valid] and "lr_core" not in selected:
         selected = (["lr_core"] + selected)[: MODEL_LIMIT[gender]]
     return selected
+
+
+def feature_key_for_model(name: str) -> str:
+    if name == "lr_core":
+        return "lr"
+    if name == "lr_plus":
+        return "lr_plus"
+    if name == "xgb_w_minimal":
+        return "w_minimal"
+    return "all"
+
+
+def evaluate_model_set_strategy(
+    oof_df: pd.DataFrame,
+    model_names: list[str],
+    gender: str,
+    eval_years: int,
+) -> Optional[dict[str, object]]:
+    prob_columns = [f"Prob_{name}" for name in model_names]
+    if not model_names or any(column not in oof_df.columns for column in prob_columns):
+        return None
+
+    diag_columns = [column for column in ["Diag_AbsSeedDiff", "Diag_T1BetterSeed", "Diag_SameConference"] if column in oof_df.columns]
+    selected = oof_df[["Season", "T1", "T2", "Label"] + diag_columns + prob_columns].copy()
+    selected_oof, _ = add_ensemble_oof(selected, model_names, gender)
+    raw_column, calibration_method, shrinkage, strategy_scores = evaluate_strategy_grid(selected_oof, eval_years=eval_years)
+    return {
+        "model_names": model_names,
+        "best_cv_brier": final_cv_score(strategy_scores),
+        "raw_column": raw_column,
+        "calibration_method": calibration_method,
+        "shrinkage": shrinkage,
+    }
+
+
+def choose_women_model_set(
+    oof_df: pd.DataFrame,
+    default_selected: list[str],
+    available_model_names: list[str],
+    eval_years: int,
+) -> Optional[dict[str, object]]:
+    candidate_sets: list[list[str]] = []
+
+    def add_candidate(candidate: list[str]) -> None:
+        filtered = [name for name in candidate if name in available_model_names]
+        if len(filtered) < 2:
+            return
+        if filtered not in candidate_sets:
+            candidate_sets.append(filtered)
+
+    add_candidate(default_selected)
+    add_candidate(["lr_core", "et_core", "et_plus", "xgb_w_minimal"])
+    add_candidate(["lr_core", "et_core", "xgb_w_minimal"])
+    add_candidate(["lr_core", "xgb_w_minimal"])
+    add_candidate(["lr_core", "lr_plus", "xgb_w_minimal"])
+
+    best_choice = None
+    for candidate in candidate_sets:
+        result = evaluate_model_set_strategy(oof_df, candidate, "W", eval_years)
+        if result is None:
+            continue
+        if best_choice is None or result["best_cv_brier"] < best_choice["best_cv_brier"]:
+            best_choice = result
+    return best_choice
 
 
 def meta_feature_frame(df: pd.DataFrame, model_names: list[str]) -> pd.DataFrame:
@@ -2908,18 +3034,14 @@ def fit_full_models(
     lr_core_feats: list[str],
     lr_plus_feats: list[str],
     all_feats: list[str],
+    women_minimal_feats: Optional[list[str]],
     gender: str,
     sample_weight: Optional[pd.Series | np.ndarray] = None,
 ) -> dict[str, object]:
     models = {}
     for name in model_names:
-        if name == "lr_core":
-            feature_key = "lr"
-        elif name == "lr_plus":
-            feature_key = "lr_plus"
-        else:
-            feature_key = "all"
-        x_train = feature_frame(matchups, feature_key, lr_core_feats, lr_plus_feats, all_feats)
+        feature_key = feature_key_for_model(name)
+        x_train = feature_frame(matchups, feature_key, lr_core_feats, lr_plus_feats, all_feats, women_minimal_feats)
         y_train = training_target_for_model(matchups, name)
         models[name] = fit_model(name, x_train, y_train, gender, sample_weight=sample_weight)
     return models
@@ -2936,17 +3058,13 @@ def base_probabilities(
     lr_core_feats: list[str],
     lr_plus_feats: list[str],
     all_feats: list[str],
+    women_minimal_feats: Optional[list[str]],
     gender: str,
 ) -> pd.DataFrame:
     frame = pd.DataFrame(index=pred_df.index)
     for name, model in models.items():
-        if name == "lr_core":
-            feature_key = "lr"
-        elif name == "lr_plus":
-            feature_key = "lr_plus"
-        else:
-            feature_key = "all"
-        x_test = feature_frame(pred_df, feature_key, lr_core_feats, lr_plus_feats, all_feats)
+        feature_key = feature_key_for_model(name)
+        x_test = feature_frame(pred_df, feature_key, lr_core_feats, lr_plus_feats, all_feats, women_minimal_feats)
         frame[f"Prob_{name}"] = predict_model(name, model, x_test, gender)
     return add_gender_strategy_columns(frame, list(models.keys()), gender)
 
@@ -3040,6 +3158,7 @@ def train_and_evaluate(
             lr_plus_feats,
             all_feats,
         )
+    women_minimal_feats = build_women_minimal_feature_list(matchups) if gender == "W" else []
     field_context = build_field_reweight_context(gender, team_feats, feature_candidates)
     has_live_field_2026 = bool(field_context.get("field_team_ids", {}).get(2026))
     market_mode = resolve_market_mode(external_config, gender)
@@ -3076,6 +3195,7 @@ def train_and_evaluate(
         lr_core_feats,
         lr_plus_feats,
         all_feats,
+        women_minimal_feats,
         gender,
         field_context=field_context if has_live_field_2026 else None,
         external_config=external_config,
@@ -3083,8 +3203,13 @@ def train_and_evaluate(
     base_scores = evaluate_base_scores(oof_df, model_names, eval_years=eval_years)
     selected_models = select_model_names(base_scores, gender)
     forced_selected_models = [name for name in resolve_gender_override_list(external_config, "forced_selected_models", gender) if name in model_names]
+    women_model_set_choice = None
     if forced_selected_models:
         selected_models = forced_selected_models
+    elif gender == "W":
+        women_model_set_choice = choose_women_model_set(oof_df, selected_models, model_names, eval_years)
+        if women_model_set_choice is not None:
+            selected_models = list(women_model_set_choice["model_names"])
     diag_columns = [column for column in ["Diag_AbsSeedDiff", "Diag_T1BetterSeed", "Diag_SameConference"] if column in oof_df.columns]
     oof_selected, final_meta = add_ensemble_oof(
         oof_df[["Season", "T1", "T2", "Label"] + diag_columns + [f"Prob_{name}" for name in selected_models]].copy(),
@@ -3132,6 +3257,7 @@ def train_and_evaluate(
         lr_core_feats,
         lr_plus_feats,
         all_feats,
+        women_minimal_feats,
         gender,
         sample_weight=final_train_weights,
     )
@@ -3225,12 +3351,23 @@ def train_and_evaluate(
         print(f"Market mode: {market_mode}")
     if forced_selected_models:
         print(f"Forced selected models: {forced_selected_models}")
+    elif women_model_set_choice is not None:
+        print(
+            "Women curated model set: "
+            f"{women_model_set_choice['model_names']} "
+            f"raw={women_model_set_choice['raw_column']} "
+            f"cal={women_model_set_choice['calibration_method']} "
+            f"shrink={women_model_set_choice['shrinkage']:.2f} "
+            f"cv={women_model_set_choice['best_cv_brier']:.5f}"
+        )
     if forced_strategy:
         print(f"Forced strategy: {forced_strategy}")
     print(f"Feature candidates ({len(feature_candidates)}): {feature_candidates}")
     print(f"LR core features ({len(lr_core_feats)}): {lr_core_feats}")
     print(f"LR plus features ({len(lr_plus_feats)}): {lr_plus_feats}")
     print(f"All matchup features ({len(all_feats)}): {all_feats}")
+    if gender == "W":
+        print(f"Women minimal tree features ({len(women_minimal_feats)}): {women_minimal_feats}")
     print(f"Available models: {model_names}")
     print(
         f"Field live reweight: ready_2026={has_live_field_2026} "
@@ -3331,9 +3468,11 @@ def train_and_evaluate(
         "lr_core_feats": lr_core_feats,
         "lr_plus_feats": lr_plus_feats,
         "all_feats": all_feats,
+        "women_minimal_feats": women_minimal_feats,
         "external_config": external_config,
         "available_models": model_names,
         "selected_models": selected_models,
+        "women_model_set_choice": {} if women_model_set_choice is None else women_model_set_choice,
         "models": final_models,
         "meta_model": final_meta,
         "selected_raw_column": selected_raw_column,
@@ -3508,6 +3647,7 @@ def predict_bundle(bundle: dict[str, object], pred_df: pd.DataFrame) -> np.ndarr
         bundle["lr_core_feats"],
         bundle["lr_plus_feats"],
         bundle["all_feats"],
+        bundle.get("women_minimal_feats"),
         bundle["gender"],
     )
     prob = strategy_probabilities(bundle, base_df)
