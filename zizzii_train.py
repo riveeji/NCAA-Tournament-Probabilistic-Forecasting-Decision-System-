@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
 from itertools import combinations
 from pathlib import Path
 from typing import Dict, Optional
 import json
+import re
 import warnings
 
 import numpy as np
@@ -105,9 +107,32 @@ DEFAULT_EXTERNAL_CONFIG = {
 }
 MARKET_RESIDUAL_MIN_ROWS = 250
 MARKET_RESIDUAL_SELECTION_MIN_COVERAGE = 0.85
+MARKET_RESIDUAL_MIN_EVAL_SEASONS = 4
 MARKET_RESIDUAL_OVERLAY_MODELS = ("histgb_market_resid", "xgb_market_resid", "lgbm_market_resid")
 MARKET_RESIDUAL_OVERLAY_BLEND_WEIGHTS = (0.35, 0.50, 0.65, 0.80, 1.00)
 MARKET_RESIDUAL_OVERLAY_MIN_EVAL_ROWS = 60
+WOMEN_LOW_SIGNAL_TEAM_PREFIXES = (
+    "FG3Pct",
+    "RecentEffFG3Pct",
+    "Recent30EffFG3Pct",
+)
+WOMEN_LOW_SIGNAL_MATCHUP_PREFIXES = (
+    "D_FG3Pct",
+    "D_RecentEffFG3Pct",
+    "D_Recent30EffFG3Pct",
+)
+WOMEN_LOW_SIGNAL_MATCHUP_NAMES = {"AbsFG3PctDiff"}
+WOMEN_LINEAR_BLEND_WEIGHTS = (0.75, 0.80, 0.82, 0.85, 0.88, 0.90, 0.92, 0.95, 0.97)
+WOMEN_CHALK_TOP_SEED_MAX = (1, 2, 3, 4, 5)
+WOMEN_CHALK_DOG_SEED_MIN = (9, 10, 11, 12, 13, 14, 15, 16)
+WOMEN_CHALK_FLOOR_PROBS = (0.84, 0.86, 0.88, 0.90, 0.92, 0.94, 0.95, 0.96, 0.97, 0.985, 0.992, 0.997, 0.999)
+WOMEN_CHALK_MAX_ROUNDS = (1, 2, 6)
+WOMEN_CHALK_REQUIRE_HOST = (False, True)
+WOMEN_DUAL_CHALK_TOP_SEED_MAX = (1, 2, 3)
+WOMEN_DUAL_CHALK_DOG_SEED_MIN = (14, 15, 16)
+WOMEN_DUAL_CHALK_MAX_ROUNDS = (1, 2)
+WOMEN_DUAL_CHALK_FLOOR_PROBS = (0.97, 0.985, 0.992, 0.997, 0.999)
+WOMEN_DUAL_CHALK_REQUIRE_HOST = (False, True)
 WOMEN_ROLLBACK_FEATURE_PREFIXES = (
     "AdjOffRtg",
     "AdjDefRtg",
@@ -348,6 +373,55 @@ def apply_feature_ablations(team_feats: pd.DataFrame, gender: str, group_names: 
     if not drop_cols:
         return team_feats, []
     return team_feats.drop(columns=sorted(drop_cols)), applied
+
+
+def simplify_women_feature_lists(
+    feature_candidates: list[str],
+    lr_core_feats: list[str],
+    lr_plus_feats: list[str],
+    all_feats: list[str],
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    def keep_team(column: str) -> bool:
+        return not column.startswith(WOMEN_LOW_SIGNAL_TEAM_PREFIXES)
+
+    def keep_matchup(column: str) -> bool:
+        if column in WOMEN_LOW_SIGNAL_MATCHUP_NAMES:
+            return False
+        return not column.startswith(WOMEN_LOW_SIGNAL_MATCHUP_PREFIXES)
+
+    feature_candidates = [column for column in feature_candidates if keep_team(column)]
+    lr_core_feats = [column for column in lr_core_feats if keep_matchup(column)]
+    lr_plus_feats = [column for column in lr_plus_feats if keep_matchup(column)]
+    all_feats = [column for column in all_feats if keep_matchup(column)]
+    return feature_candidates, lr_core_feats, lr_plus_feats, all_feats
+
+
+def resolve_gender_override_list(external_config: dict, key: str, gender: str) -> list[str]:
+    value = external_config.get(key)
+    if isinstance(value, dict):
+        value = value.get(gender)
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return [str(item) for item in value]
+
+
+def resolve_gender_override_dict(external_config: dict, key: str, gender: str) -> dict[str, object]:
+    value = external_config.get(key)
+    if isinstance(value, dict) and gender in value and isinstance(value.get(gender), dict):
+        return dict(value[gender])
+    if isinstance(value, dict) and gender not in value:
+        return dict(value)
+    return {}
+
+
+def resolve_women_feature_simplify_enabled(external_config: dict) -> bool:
+    return bool(external_config.get("women_feature_simplify_enabled", True))
+
+
+def resolve_women_chalk_extremes_enabled(external_config: dict) -> bool:
+    return bool(external_config.get("women_chalk_extremes_enabled", True))
 
 
 def resolve_market_mode(external_config: dict, gender: str) -> str:
@@ -596,6 +670,46 @@ def load_matchup_market_odds(gender: str, external_dir: Optional[Path] = None) -
     )
 
 
+def market_coverage_by_season(df: pd.DataFrame) -> dict[int, float]:
+    if df.empty or "MarketProb" not in df.columns or "Season" not in df.columns:
+        return {}
+    coverage = (
+        df.groupby("Season", as_index=True)["MarketProb"]
+        .apply(lambda values: float(values.notna().mean()))
+        .to_dict()
+    )
+    return {int(season): float(value) for season, value in coverage.items()}
+
+
+def recent_market_residual_ready(
+    matchups: pd.DataFrame,
+    eval_years: int,
+    min_coverage: float,
+    min_eval_seasons: int = MARKET_RESIDUAL_MIN_EVAL_SEASONS,
+) -> tuple[bool, dict[str, object]]:
+    if matchups.empty or "MarketProb" not in matchups.columns:
+        return False, {
+            "coverage_by_season": {},
+            "eligible_eval_seasons": [],
+            "matched_rows_in_eval_window": 0,
+            "eval_window_seasons": [],
+        }
+
+    coverage_by_season = market_coverage_by_season(matchups)
+    eval_seasons = sorted(int(season) for season in matchups["Season"].unique())[-eval_years:]
+    eligible_eval_seasons = [season for season in eval_seasons if coverage_by_season.get(season, 0.0) >= float(min_coverage)]
+    matched_rows_in_eval_window = int(
+        matchups.loc[matchups["Season"].isin(eligible_eval_seasons), "MarketProb"].notna().sum()
+    )
+    ready = len(eligible_eval_seasons) >= min(min_eval_seasons, len(eval_seasons)) and matched_rows_in_eval_window >= MARKET_RESIDUAL_MIN_ROWS
+    return ready, {
+        "coverage_by_season": coverage_by_season,
+        "eligible_eval_seasons": eligible_eval_seasons,
+        "matched_rows_in_eval_window": matched_rows_in_eval_window,
+        "eval_window_seasons": eval_seasons,
+    }
+
+
 def load_manual_signals(gender: str, external_dir: Optional[Path] = None) -> pd.DataFrame:
     frames = []
     for path in find_external_csvs(gender, SIGNAL_KEYWORDS, external_dir=external_dir):
@@ -724,6 +838,111 @@ def merge_team_signal_features(df: pd.DataFrame, signal_df: pd.DataFrame) -> pd.
         if left in merged.columns and right in merged.columns:
             merged[f"D_{column}"] = merged[left].fillna(0.0) - merged[right].fillna(0.0)
     return merged
+
+
+@lru_cache(maxsize=4)
+def load_women_tourney_round_map() -> pd.DataFrame:
+    seeds_path = DATA_DIR / "WNCAATourneySeeds.csv"
+    slots_path = DATA_DIR / "WNCAATourneySlots.csv"
+    if not seeds_path.exists() or not slots_path.exists():
+        return pd.DataFrame(columns=["Season", "T1", "T2", "TourneyRound"])
+
+    try:
+        seeds_raw = pd.read_csv(seeds_path)
+        slots = pd.read_csv(slots_path)
+    except Exception:
+        return pd.DataFrame(columns=["Season", "T1", "T2", "TourneyRound"])
+
+    if seeds_raw.empty or slots.empty:
+        return pd.DataFrame(columns=["Season", "T1", "T2", "TourneyRound"])
+
+    rows: list[pd.DataFrame] = []
+    valid_seasons = sorted(set(pd.to_numeric(seeds_raw["Season"], errors="coerce").dropna().astype(int)).intersection(
+        set(pd.to_numeric(slots["Season"], errors="coerce").dropna().astype(int))
+    ))
+    for season in valid_seasons:
+        season_seeds = seeds_raw[pd.to_numeric(seeds_raw["Season"], errors="coerce") == season][["Seed", "TeamID"]].dropna().copy()
+        season_slots = slots[pd.to_numeric(slots["Season"], errors="coerce") == season].copy()
+        if season_seeds.empty or season_slots.empty:
+            continue
+
+        seed_to_team = {
+            str(seed): int(team_id)
+            for seed, team_id in season_seeds[["Seed", "TeamID"]].itertuples(index=False, name=None)
+        }
+        children = season_slots.set_index("Slot")[["StrongSeed", "WeakSeed"]].to_dict("index")
+        memo: dict[str, set[int]] = {}
+
+        def descendants(node: object) -> set[int]:
+            key = str(node)
+            if key in memo:
+                return memo[key]
+            if key in children:
+                row = children[key]
+                memo[key] = descendants(row["StrongSeed"]) | descendants(row["WeakSeed"])
+                return memo[key]
+            team_id = seed_to_team.get(key)
+            memo[key] = {team_id} if team_id is not None else set()
+            return memo[key]
+
+        pair_rounds: dict[tuple[int, int], int] = {}
+        for row in season_slots.itertuples(index=False):
+            match = re.match(r"R(\d+)", str(row.Slot))
+            if match is None:
+                continue
+            round_num = int(match.group(1))
+            strong = descendants(row.StrongSeed)
+            weak = descendants(row.WeakSeed)
+            for left in strong:
+                for right in weak:
+                    if left == right:
+                        continue
+                    t1, t2 = sorted((int(left), int(right)))
+                    key = (t1, t2)
+                    if key not in pair_rounds or round_num < pair_rounds[key]:
+                        pair_rounds[key] = round_num
+
+        if pair_rounds:
+            season_rows = pd.DataFrame(
+                [(season, t1, t2, round_num) for (t1, t2), round_num in pair_rounds.items()],
+                columns=["Season", "T1", "T2", "TourneyRound"],
+            )
+            rows.append(season_rows)
+
+    if not rows:
+        return pd.DataFrame(columns=["Season", "T1", "T2", "TourneyRound"])
+    return pd.concat(rows, ignore_index=True)
+
+
+def add_women_tourney_structure_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    structure = load_women_tourney_round_map()
+    if structure.empty:
+        return df, []
+
+    merged = df.merge(structure, on=["Season", "T1", "T2"], how="left")
+    extras: list[str] = []
+
+    round_num = pd.to_numeric(merged.get("TourneyRound"), errors="coerce")
+    if round_num.notna().any():
+        merged["IsRound1"] = (round_num == 1).astype(int)
+        merged["IsRound2"] = (round_num == 2).astype(int)
+        merged["IsEarlyRound"] = round_num.isin([1, 2]).astype(int)
+        extras.extend(["TourneyRound", "IsRound1", "IsRound2", "IsEarlyRound"])
+
+    required = {"T1_SeedNum", "T2_SeedNum", "TourneyRound"}
+    if required.issubset(merged.columns):
+        t1_seed = pd.to_numeric(merged["T1_SeedNum"], errors="coerce")
+        t2_seed = pd.to_numeric(merged["T2_SeedNum"], errors="coerce")
+        early_round = round_num.isin([1, 2])
+        t1_host = early_round & t1_seed.le(4) & t1_seed.lt(t2_seed)
+        t2_host = early_round & t2_seed.le(4) & t2_seed.lt(t1_seed)
+        merged["T1_WHostLikely"] = t1_host.astype(int)
+        merged["T2_WHostLikely"] = t2_host.astype(int)
+        merged["D_WHostLikely"] = merged["T1_WHostLikely"] - merged["T2_WHostLikely"]
+        merged["AnyWHostLikely"] = (t1_host | t2_host).astype(int)
+        extras.extend(["T1_WHostLikely", "T2_WHostLikely", "D_WHostLikely", "AnyWHostLikely"])
+
+    return merged, extras
 
 
 def load_official_field_seeds(gender: str) -> pd.DataFrame:
@@ -918,6 +1137,8 @@ def build_matchup_df(tourney_results: pd.DataFrame, team_feats: pd.DataFrame, ge
     merged = merged.merge(t2f, on=["Season", "T2"], how="left")
     merged, diff_feats = compute_diff_features(merged, feature_candidates)
     merged, extra_feats = add_matchup_context_features(merged)
+    if gender == "W":
+        merged, _ = add_women_tourney_structure_features(merged)
 
     lr_core_feats = [f"D_{feat}" for feat in LR_CORE_FEATURES[gender] if f"D_{feat}" in merged.columns]
     lr_plus_feats = [f"D_{feat}" for feat in LR_PLUS_FEATURES[gender] if f"D_{feat}" in merged.columns]
@@ -1040,6 +1261,28 @@ def make_xgb_margin(gender: str):
         reg_lambda=1.0,
         objective="reg:squarederror",
         eval_metric="rmse",
+        random_state=42,
+        tree_method="hist",
+    )
+
+
+def make_xgb_margin_huber(gender: str):
+    if xgb is None:
+        return None
+    max_depth = 4 if gender == "M" else 3
+    n_estimators = 560 if gender == "M" else 400
+    return xgb.XGBRegressor(
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        learning_rate=0.035,
+        subsample=0.82,
+        colsample_bytree=0.78,
+        min_child_weight=3,
+        gamma=0.05,
+        reg_alpha=0.05,
+        reg_lambda=1.0,
+        objective="reg:pseudohubererror",
+        eval_metric="mae",
         random_state=42,
         tree_method="hist",
     )
@@ -1171,6 +1414,7 @@ def available_model_specs(gender: str, enable_market_residual: bool = False) -> 
         specs.append(ModelSpec("xgb", "all"))
         specs.append(ModelSpec("xgb_mse", "all"))
         specs.append(ModelSpec("xgb_margin", "all"))
+        specs.append(ModelSpec("xgb_margin_huber", "all"))
         specs.append(ModelSpec("xgb_margin_cauchy", "all"))
         if enable_market_residual:
             specs.append(ModelSpec("xgb_market_resid", "all"))
@@ -1199,6 +1443,8 @@ def build_model(name: str, gender: str):
         return make_xgb_mse(gender)
     if name == "xgb_margin":
         return make_xgb_margin(gender)
+    if name == "xgb_margin_huber":
+        return make_xgb_margin_huber(gender)
     if name == "xgb_margin_cauchy":
         return make_xgb_margin_cauchy(gender)
     if name == "xgb_market_resid":
@@ -1343,17 +1589,21 @@ def evaluate_base_scores(oof_df: pd.DataFrame, model_names: list[str], eval_year
     scores = {}
     for name in model_names:
         column = f"Prob_{name}"
-        coverage = float(oof_df[column].notna().mean()) if column in oof_df.columns else 0.0
-        if is_market_residual_model(name) and coverage < MARKET_RESIDUAL_SELECTION_MIN_COVERAGE:
-            scores[name] = np.nan
-            continue
         season_scores = []
         for season in eval_seasons:
             fold = oof_df[(oof_df["Season"] == season) & oof_df[column].notna()]
+            if is_market_residual_model(name):
+                season_total = oof_df[oof_df["Season"] == season]
+                season_coverage = float(season_total[column].notna().mean()) if not season_total.empty else 0.0
+                if season_coverage < MARKET_RESIDUAL_SELECTION_MIN_COVERAGE:
+                    continue
             if fold.empty:
                 continue
             season_scores.append(brier_score_loss(fold["Label"], fold[column]))
-        scores[name] = float(np.mean(season_scores)) if season_scores else np.nan
+        if is_market_residual_model(name) and len(season_scores) < min(MARKET_RESIDUAL_MIN_EVAL_SEASONS, len(eval_seasons)):
+            scores[name] = np.nan
+        else:
+            scores[name] = float(np.mean(season_scores)) if season_scores else np.nan
     return scores
 
 
@@ -1389,7 +1639,28 @@ def meta_feature_frame(df: pd.DataFrame, model_names: list[str]) -> pd.DataFrame
     return pd.DataFrame(features, index=df.index)
 
 
-def add_ensemble_oof(oof_df: pd.DataFrame, model_names: list[str]) -> tuple[pd.DataFrame, Optional[LogisticRegression]]:
+def add_gender_strategy_columns(df: pd.DataFrame, model_names: list[str], gender: str) -> pd.DataFrame:
+    out = df.copy()
+    if gender != "W":
+        return out
+
+    lr_columns = [column for column in [f"Prob_{name}" for name in model_names if name.startswith("lr_")] if column in out.columns]
+    if not lr_columns:
+        return out
+
+    linear_prob = out[lr_columns].mean(axis=1)
+    other_columns = [column for column in [f"Prob_{name}" for name in model_names if not name.startswith("lr_")] if column in out.columns]
+    tree_prob = out[other_columns].mean(axis=1) if other_columns else linear_prob
+
+    out["Prob_w_linear_only"] = safe_clip(linear_prob.fillna(0.5).to_numpy())
+    for weight in WOMEN_LINEAR_BLEND_WEIGHTS:
+        out[f"Prob_w_lr_tilt_{int(round(weight * 100))}"] = safe_clip(
+            (weight * linear_prob + (1.0 - weight) * tree_prob).fillna(0.5).to_numpy()
+        )
+    return out
+
+
+def add_ensemble_oof(oof_df: pd.DataFrame, model_names: list[str], gender: str) -> tuple[pd.DataFrame, Optional[LogisticRegression]]:
     oof = oof_df.copy()
     oof["ProbMean"] = oof[[f"Prob_{name}" for name in model_names]].mean(axis=1)
     oof["ProbStack"] = np.nan
@@ -1411,7 +1682,7 @@ def add_ensemble_oof(oof_df: pd.DataFrame, model_names: list[str]) -> tuple[pd.D
         final_meta = make_meta_learner()
         final_meta.fit(meta_feature_frame(oof, model_names), oof["Label"])
 
-    return oof, final_meta
+    return add_gender_strategy_columns(oof, model_names, gender), final_meta
 
 
 def fit_calibrator(method: str, train_prob: np.ndarray, labels: np.ndarray):
@@ -1470,9 +1741,6 @@ def evaluate_strategy_grid(oof_df: pd.DataFrame, eval_years: int) -> tuple[str, 
     for column in candidate_columns:
         if column.startswith("Prob_"):
             model_name = column.removeprefix("Prob_")
-            coverage = float(oof_df[column].notna().mean())
-            if is_market_residual_model(model_name) and coverage < MARKET_RESIDUAL_SELECTION_MIN_COVERAGE:
-                continue
         for method in ["none", "platt", "isotonic"]:
             fold_scores = []
             fold_predictions: list[tuple[np.ndarray, np.ndarray]] = []
@@ -1481,6 +1749,10 @@ def evaluate_strategy_grid(oof_df: pd.DataFrame, eval_years: int) -> tuple[str, 
                 test_df = oof_df[oof_df["Season"] == season]
                 if test_df.empty:
                     continue
+                if column.startswith("Prob_") and is_market_residual_model(model_name):
+                    season_coverage = float(test_df[column].notna().mean()) if column in test_df.columns else 0.0
+                    if season_coverage < MARKET_RESIDUAL_SELECTION_MIN_COVERAGE:
+                        continue
                 raw_train = resolved_strategy_probabilities(train_df, column)
                 raw_test = resolved_strategy_probabilities(test_df, column)
                 if method == "none" or len(train_df) < CALIBRATION_MIN_ROWS:
@@ -1492,6 +1764,9 @@ def evaluate_strategy_grid(oof_df: pd.DataFrame, eval_years: int) -> tuple[str, 
                     except Exception:
                         pred = raw_test
                 fold_predictions.append((test_df["Label"].to_numpy(), pred))
+            if column.startswith("Prob_") and is_market_residual_model(model_name):
+                if len(fold_predictions) < min(MARKET_RESIDUAL_MIN_EVAL_SEASONS, len(eval_seasons)):
+                    continue
             for shrinkage in SHRINKAGE_GRID:
                 scores = []
                 for labels, pred in fold_predictions:
@@ -2237,6 +2512,255 @@ def build_adaptive_market_blend_oof(
     return pd.concat(rows, ignore_index=True)
 
 
+def apply_women_chalk_rule_array(df: pd.DataFrame, prob: np.ndarray, config: dict[str, object]) -> np.ndarray:
+    adjusted = safe_clip(prob)
+    required = {"T1_SeedNum", "T2_SeedNum"}
+    if not required.issubset(df.columns):
+        return adjusted
+
+    t1_seed = pd.to_numeric(df["T1_SeedNum"], errors="coerce").to_numpy()
+    t2_seed = pd.to_numeric(df["T2_SeedNum"], errors="coerce").to_numpy()
+    top_seed_max = int(config["top_seed_max"])
+    dog_seed_min = int(config["dog_seed_min"])
+    floor_prob = float(config["floor_prob"])
+    max_round = int(config.get("max_round", 6))
+    require_host_likely = bool(config.get("require_host_likely", False))
+
+    active_mask = np.ones(len(adjusted), dtype=bool)
+    if max_round < 6:
+        if "TourneyRound" not in df.columns:
+            return adjusted
+        round_num = pd.to_numeric(df["TourneyRound"], errors="coerce").to_numpy()
+        active_mask &= np.isfinite(round_num) & (round_num <= max_round)
+    if require_host_likely:
+        if "AnyWHostLikely" not in df.columns:
+            return adjusted
+        host_mask = pd.to_numeric(df["AnyWHostLikely"], errors="coerce").fillna(0).to_numpy().astype(bool)
+        active_mask &= host_mask
+
+    t1_chalk = active_mask & np.isfinite(t1_seed) & np.isfinite(t2_seed) & (t1_seed <= top_seed_max) & (t2_seed >= dog_seed_min)
+    t2_chalk = active_mask & np.isfinite(t1_seed) & np.isfinite(t2_seed) & (t2_seed <= top_seed_max) & (t1_seed >= dog_seed_min)
+    if t1_chalk.any():
+        adjusted[t1_chalk] = np.maximum(adjusted[t1_chalk], floor_prob)
+    if t2_chalk.any():
+        adjusted[t2_chalk] = np.minimum(adjusted[t2_chalk], 1.0 - floor_prob)
+    return safe_clip(adjusted)
+
+
+def evaluate_women_chalk_extremes(
+    matchups: pd.DataFrame,
+    strategy_oof: pd.DataFrame,
+    eval_years: int,
+    base_best_cv: float,
+) -> Optional[dict[str, object]]:
+    if strategy_oof.empty:
+        return None
+
+    merged = matchups.merge(
+        strategy_oof[[column for column in strategy_oof.columns if column in {"Season", "T1", "T2", "Label", "RawProb", "FinalProb", "FavoriteProb"}]],
+        on=["Season", "T1", "T2", "Label"],
+        how="inner",
+    )
+    if merged.empty or not {"T1_SeedNum", "T2_SeedNum"}.issubset(merged.columns):
+        return None
+
+    eval_seasons = sorted(merged["Season"].unique())[-eval_years:]
+    grid_scores: dict[str, float] = {}
+    configs: dict[str, dict[str, object]] = {}
+    for top_seed_max in WOMEN_CHALK_TOP_SEED_MAX:
+        for dog_seed_min in WOMEN_CHALK_DOG_SEED_MIN:
+            if dog_seed_min <= top_seed_max:
+                continue
+            for floor_prob in WOMEN_CHALK_FLOOR_PROBS:
+                for max_round in WOMEN_CHALK_MAX_ROUNDS:
+                    for require_host_likely in WOMEN_CHALK_REQUIRE_HOST:
+                        config = {
+                            "top_seed_max": int(top_seed_max),
+                            "dog_seed_min": int(dog_seed_min),
+                            "floor_prob": float(floor_prob),
+                            "max_round": int(max_round),
+                            "require_host_likely": bool(require_host_likely),
+                        }
+                        scores = []
+                        affected_rows = 0
+                        for season in eval_seasons:
+                            test_df = merged[merged["Season"] == season].copy()
+                            if test_df.empty:
+                                continue
+                            pred = apply_women_chalk_rule_array(test_df, test_df["FinalProb"].to_numpy(), config)
+                            affected_rows += int(np.sum(np.abs(pred - test_df["FinalProb"].to_numpy()) > 1e-12))
+                            scores.append(brier_score_loss(test_df["Label"], pred))
+
+                        if scores and affected_rows > 0:
+                            key = json.dumps(config, sort_keys=True)
+                            grid_scores[key] = float(np.mean(scores))
+                            configs[key] = config
+
+    if not grid_scores:
+        return None
+
+    best_key = min(grid_scores, key=grid_scores.get)
+    best_score = grid_scores[best_key]
+    if best_score >= base_best_cv - 0.000001:
+        return None
+
+    best_config = dict(configs[best_key])
+    best_config["best_cv_brier"] = best_score
+    best_config["grid_scores"] = grid_scores
+    return best_config
+
+
+def build_women_chalk_extremes_oof(
+    matchups: pd.DataFrame,
+    strategy_oof: pd.DataFrame,
+    config: dict[str, object],
+) -> pd.DataFrame:
+    merged = matchups.merge(
+        strategy_oof[[column for column in strategy_oof.columns if column in {"Season", "T1", "T2", "Label", "RawProb", "FinalProb", "FavoriteProb"}]],
+        on=["Season", "T1", "T2", "Label"],
+        how="inner",
+    )
+    if merged.empty:
+        return strategy_oof
+
+    rows = []
+    for season in sorted(merged["Season"].unique()):
+        test_df = merged[merged["Season"] == season].copy()
+        if test_df.empty:
+            continue
+
+        pred = apply_women_chalk_rule_array(test_df, test_df["FinalProb"].to_numpy(), config)
+        season_strategy = strategy_oof[strategy_oof["Season"] == season].copy()
+        rows.append(replace_strategy_final_prob(season_strategy, test_df, pred))
+
+    if not rows:
+        return strategy_oof
+    return pd.concat(rows, ignore_index=True)
+
+
+def apply_women_chalk_rule_sequence(
+    df: pd.DataFrame,
+    prob: np.ndarray,
+    configs: list[dict[str, object]],
+) -> np.ndarray:
+    adjusted = safe_clip(prob)
+    for config in configs:
+        adjusted = apply_women_chalk_rule_array(df, adjusted, config)
+    return safe_clip(adjusted)
+
+
+def evaluate_women_dual_chalk_extremes(
+    matchups: pd.DataFrame,
+    strategy_oof: pd.DataFrame,
+    eval_years: int,
+    primary_config: dict[str, object],
+    base_best_cv: float,
+) -> Optional[dict[str, object]]:
+    if strategy_oof.empty:
+        return None
+
+    merged = matchups.merge(
+        strategy_oof[[column for column in strategy_oof.columns if column in {"Season", "T1", "T2", "Label", "RawProb", "FinalProb", "FavoriteProb"}]],
+        on=["Season", "T1", "T2", "Label"],
+        how="inner",
+    )
+    if merged.empty or not {"T1_SeedNum", "T2_SeedNum"}.issubset(merged.columns):
+        return None
+
+    eval_seasons = sorted(merged["Season"].unique())[-eval_years:]
+    grid_scores: dict[str, float] = {}
+    configs: dict[str, dict[str, object]] = {}
+    primary_floor = float(primary_config.get("floor_prob", 0.5))
+    primary_top = int(primary_config.get("top_seed_max", 16))
+    primary_dog = int(primary_config.get("dog_seed_min", 1))
+    primary_round = int(primary_config.get("max_round", 6))
+
+    for top_seed_max in WOMEN_DUAL_CHALK_TOP_SEED_MAX:
+        if top_seed_max > primary_top:
+            continue
+        for dog_seed_min in WOMEN_DUAL_CHALK_DOG_SEED_MIN:
+            if dog_seed_min < primary_dog:
+                continue
+            if dog_seed_min <= top_seed_max:
+                continue
+            for max_round in WOMEN_DUAL_CHALK_MAX_ROUNDS:
+                if max_round > primary_round:
+                    continue
+                for floor_prob in WOMEN_DUAL_CHALK_FLOOR_PROBS:
+                    if floor_prob < primary_floor:
+                        continue
+                    for require_host_likely in WOMEN_DUAL_CHALK_REQUIRE_HOST:
+                        secondary_config = {
+                            "top_seed_max": int(top_seed_max),
+                            "dog_seed_min": int(dog_seed_min),
+                            "floor_prob": float(floor_prob),
+                            "max_round": int(max_round),
+                            "require_host_likely": bool(require_host_likely),
+                        }
+                        scores = []
+                        affected_rows = 0
+                        for season in eval_seasons:
+                            test_df = merged[merged["Season"] == season].copy()
+                            if test_df.empty:
+                                continue
+                            pred = apply_women_chalk_rule_sequence(
+                                test_df,
+                                test_df["FinalProb"].to_numpy(),
+                                [primary_config, secondary_config],
+                            )
+                            affected_rows += int(np.sum(np.abs(pred - test_df["FinalProb"].to_numpy()) > 1e-12))
+                            scores.append(brier_score_loss(test_df["Label"], pred))
+
+                        if scores and affected_rows > 0:
+                            key = json.dumps(secondary_config, sort_keys=True)
+                            grid_scores[key] = float(np.mean(scores))
+                            configs[key] = secondary_config
+
+    if not grid_scores:
+        return None
+
+    best_key = min(grid_scores, key=grid_scores.get)
+    best_score = grid_scores[best_key]
+    if best_score >= base_best_cv - 0.000001:
+        return None
+
+    return {
+        "primary_config": dict(primary_config),
+        "secondary_config": dict(configs[best_key]),
+        "best_cv_brier": best_score,
+        "grid_scores": grid_scores,
+    }
+
+
+def build_women_dual_chalk_extremes_oof(
+    matchups: pd.DataFrame,
+    strategy_oof: pd.DataFrame,
+    config: dict[str, object],
+) -> pd.DataFrame:
+    merged = matchups.merge(
+        strategy_oof[[column for column in strategy_oof.columns if column in {"Season", "T1", "T2", "Label", "RawProb", "FinalProb", "FavoriteProb"}]],
+        on=["Season", "T1", "T2", "Label"],
+        how="inner",
+    )
+    if merged.empty:
+        return strategy_oof
+
+    rows = []
+    configs = [config["primary_config"], config["secondary_config"]]
+    for season in sorted(merged["Season"].unique()):
+        test_df = merged[merged["Season"] == season].copy()
+        if test_df.empty:
+            continue
+
+        pred = apply_women_chalk_rule_sequence(test_df, test_df["FinalProb"].to_numpy(), configs)
+        season_strategy = strategy_oof[strategy_oof["Season"] == season].copy()
+        rows.append(replace_strategy_final_prob(season_strategy, test_df, pred))
+
+    if not rows:
+        return strategy_oof
+    return pd.concat(rows, ignore_index=True)
+
+
 def calibration_bin_report(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=["ProbType", "BinLow", "BinHigh", "Count", "PredMean", "ActualRate", "Brier", "CalibrationGap"])
@@ -2424,7 +2948,7 @@ def base_probabilities(
             feature_key = "all"
         x_test = feature_frame(pred_df, feature_key, lr_core_feats, lr_plus_feats, all_feats)
         frame[f"Prob_{name}"] = predict_model(name, model, x_test, gender)
-    return frame
+    return add_gender_strategy_columns(frame, list(models.keys()), gender)
 
 
 def append_benchmark(run_id: str, bundle: dict[str, object], matchups: pd.DataFrame) -> None:
@@ -2458,6 +2982,12 @@ def append_benchmark(run_id: str, bundle: dict[str, object], matchups: pd.DataFr
                 "HasAdaptiveMarketBlend": bool(bundle.get("adaptive_market_blend")),
                 "AdaptiveMarketBlendCV": bundle.get("adaptive_market_blend_best_cv"),
                 "AdaptiveMarketBlendConfig": json.dumps(bundle.get("adaptive_market_blend_config", {}), sort_keys=True),
+                "HasWomenChalkExtremes": bool(bundle.get("women_chalk_extremes")),
+                "WomenChalkExtremesCV": bundle.get("women_chalk_extremes_best_cv"),
+                "WomenChalkExtremesConfig": json.dumps(bundle.get("women_chalk_extremes_config", {}), sort_keys=True),
+                "HasWomenDualChalkExtremes": bool(bundle.get("women_dual_chalk_extremes")),
+                "WomenDualChalkExtremesCV": bundle.get("women_dual_chalk_extremes_best_cv"),
+                "WomenDualChalkExtremesConfig": json.dumps(bundle.get("women_dual_chalk_extremes_config", {}), sort_keys=True),
                 "HasFieldLiveReweight": bool(bundle.get("field_reweight_info", {}).get("enabled")),
                 "FieldLiveReweightSeason": bundle.get("field_reweight_info", {}).get("target_season"),
                 "FieldLiveReweightFeatureCount": len(bundle.get("field_reweight_info", {}).get("used_features", [])),
@@ -2503,6 +3033,13 @@ def train_and_evaluate(
     feature_ablations = resolve_feature_ablation_groups(external_config, gender)
     team_feats, applied_feature_ablations = apply_feature_ablations(team_feats, gender, feature_ablations)
     matchups, feature_candidates, lr_core_feats, lr_plus_feats, all_feats = build_matchup_df(tourney, team_feats, gender)
+    if gender == "W" and resolve_women_feature_simplify_enabled(external_config):
+        feature_candidates, lr_core_feats, lr_plus_feats, all_feats = simplify_women_feature_lists(
+            feature_candidates,
+            lr_core_feats,
+            lr_plus_feats,
+            all_feats,
+        )
     field_context = build_field_reweight_context(gender, team_feats, feature_candidates)
     has_live_field_2026 = bool(field_context.get("field_team_ids", {}).get(2026))
     market_mode = resolve_market_mode(external_config, gender)
@@ -2518,10 +3055,19 @@ def train_and_evaluate(
                 if column not in feature_list:
                     feature_list.append(column)
 
-    residual_enabled = bool(
-        market_mode != "no_market_all" and
-        market_feats and market_coverage >= float(external_config.get("min_market_coverage_for_residual_models", 0.85))
-    )
+    residual_enabled = False
+    market_residual_info = {
+        "coverage_by_season": {},
+        "eligible_eval_seasons": [],
+        "matched_rows_in_eval_window": 0,
+        "eval_window_seasons": [],
+    }
+    if market_mode != "no_market_all" and market_feats:
+        residual_enabled, market_residual_info = recent_market_residual_ready(
+            matchups,
+            eval_years=eval_years,
+            min_coverage=float(external_config.get("min_market_coverage_for_residual_models", 0.85)),
+        )
     specs = available_model_specs(gender, enable_market_residual=residual_enabled)
     model_names = [spec.name for spec in specs]
     oof_df = generate_base_oof(
@@ -2536,12 +3082,34 @@ def train_and_evaluate(
     )
     base_scores = evaluate_base_scores(oof_df, model_names, eval_years=eval_years)
     selected_models = select_model_names(base_scores, gender)
+    forced_selected_models = [name for name in resolve_gender_override_list(external_config, "forced_selected_models", gender) if name in model_names]
+    if forced_selected_models:
+        selected_models = forced_selected_models
     diag_columns = [column for column in ["Diag_AbsSeedDiff", "Diag_T1BetterSeed", "Diag_SameConference"] if column in oof_df.columns]
     oof_selected, final_meta = add_ensemble_oof(
         oof_df[["Season", "T1", "T2", "Label"] + diag_columns + [f"Prob_{name}" for name in selected_models]].copy(),
         selected_models,
+        gender,
     )
     selected_raw_column, calibration_method, shrinkage, strategy_scores = evaluate_strategy_grid(oof_selected, eval_years=eval_years)
+    forced_strategy = resolve_gender_override_dict(external_config, "forced_strategy", gender)
+    if forced_strategy:
+        forced_raw_column = str(forced_strategy.get("raw_column", selected_raw_column))
+        if forced_raw_column in oof_selected.columns:
+            selected_raw_column = forced_raw_column
+        calibration_method = str(forced_strategy.get("calibration", calibration_method))
+        shrinkage = float(forced_strategy.get("shrinkage", shrinkage))
+        forced_strategy_oof = build_strategy_oof_predictions(
+            oof_selected,
+            selected_raw_column,
+            calibration_method,
+            shrinkage,
+            eval_years=eval_years,
+        )
+        if not forced_strategy_oof.empty:
+            strategy_scores = dict(strategy_scores)
+            strategy_key = f"{selected_raw_column}|{calibration_method}|shrink={shrinkage:.2f}"
+            strategy_scores[strategy_key] = float(brier_score_loss(forced_strategy_oof["Label"], forced_strategy_oof["FinalProb"]))
 
     calibrator = None
     if calibration_method != "none":
@@ -2573,6 +3141,8 @@ def train_and_evaluate(
     strategy_oof = None
     market_residual_overlay = None
     adaptive_market_blend = None
+    women_chalk_extremes = None
+    women_dual_chalk_extremes = None
     if gender == "M":
         strategy_oof = build_strategy_oof_predictions(oof_selected, selected_raw_column, calibration_method, shrinkage, eval_years=None)
         market_residual_overlay = evaluate_market_residual_overlay(
@@ -2617,6 +3187,28 @@ def train_and_evaluate(
         if adaptive_market_blend is not None:
             best_cv = float(adaptive_market_blend["best_cv_brier"])
             strategy_oof = build_adaptive_market_blend_oof(matchups, strategy_oof, adaptive_market_blend)
+    if gender == "W":
+        strategy_oof = build_strategy_oof_predictions(oof_selected, selected_raw_column, calibration_method, shrinkage, eval_years=None)
+        if resolve_women_chalk_extremes_enabled(external_config):
+            women_chalk_extremes = evaluate_women_chalk_extremes(
+                matchups,
+                strategy_oof,
+                eval_years=eval_years,
+                base_best_cv=best_cv,
+            )
+            if women_chalk_extremes is not None:
+                best_cv = float(women_chalk_extremes["best_cv_brier"])
+                strategy_oof = build_women_chalk_extremes_oof(matchups, strategy_oof, women_chalk_extremes)
+                women_dual_chalk_extremes = evaluate_women_dual_chalk_extremes(
+                    matchups,
+                    strategy_oof,
+                    eval_years=eval_years,
+                    primary_config=women_chalk_extremes,
+                    base_best_cv=best_cv,
+                )
+                if women_dual_chalk_extremes is not None:
+                    best_cv = float(women_dual_chalk_extremes["best_cv_brier"])
+                    strategy_oof = build_women_dual_chalk_extremes_oof(matchups, strategy_oof, women_dual_chalk_extremes)
 
     print(f"Training samples: {len(matchups)}")
     print(f"Elo params: {elo_params}")
@@ -2631,6 +3223,10 @@ def train_and_evaluate(
         print(f"Feature ablations: {applied_feature_ablations}")
     if market_mode != "default":
         print(f"Market mode: {market_mode}")
+    if forced_selected_models:
+        print(f"Forced selected models: {forced_selected_models}")
+    if forced_strategy:
+        print(f"Forced strategy: {forced_strategy}")
     print(f"Feature candidates ({len(feature_candidates)}): {feature_candidates}")
     print(f"LR core features ({len(lr_core_feats)}): {lr_core_feats}")
     print(f"LR plus features ({len(lr_plus_feats)}): {lr_plus_feats}")
@@ -2644,6 +3240,12 @@ def train_and_evaluate(
     )
     print(f"Market odds coverage: {market_coverage:.1%}")
     print(f"Market residual models enabled: {residual_enabled}")
+    if market_residual_info["eligible_eval_seasons"]:
+        print(
+            "Market residual eligible eval seasons: "
+            f"{market_residual_info['eligible_eval_seasons']} "
+            f"matched_rows={market_residual_info['matched_rows_in_eval_window']}"
+        )
     print(f"Base CV Brier: {base_scores}")
     print(f"Selected models: {selected_models}")
     print(f"Best strategy: {selected_raw_column} + {calibration_method} + shrink={shrinkage:.2f} -> {best_cv:.5f}")
@@ -2676,6 +3278,27 @@ def train_and_evaluate(
             f"close(seed<={adaptive_market_blend['close_seed_threshold']})={adaptive_market_blend['close_weight']:.2f} "
             f"wide(seed>={adaptive_market_blend['wide_seed_threshold']})={adaptive_market_blend['wide_weight']:.2f} "
             f"-> {adaptive_market_blend['best_cv_brier']:.5f}"
+        )
+    if women_chalk_extremes is not None:
+        print(
+            "Women chalk extremes: "
+            f"top_seed<={women_chalk_extremes['top_seed_max']} "
+            f"dog_seed>={women_chalk_extremes['dog_seed_min']} "
+            f"max_round<={women_chalk_extremes.get('max_round', 6)} "
+            f"host={bool(women_chalk_extremes.get('require_host_likely', False))} "
+            f"floor={women_chalk_extremes['floor_prob']:.3f} "
+            f"-> {women_chalk_extremes['best_cv_brier']:.5f}"
+        )
+    if women_dual_chalk_extremes is not None:
+        secondary = women_dual_chalk_extremes["secondary_config"]
+        print(
+            "Women dual chalk: "
+            f"top_seed<={secondary['top_seed_max']} "
+            f"dog_seed>={secondary['dog_seed_min']} "
+            f"max_round<={secondary.get('max_round', 6)} "
+            f"host={bool(secondary.get('require_host_likely', False))} "
+            f"floor={secondary['floor_prob']:.3f} "
+            f"-> {women_dual_chalk_extremes['best_cv_brier']:.5f}"
         )
 
     coef_model_name = "lr_core" if "lr_core" in final_models else ("lr_plus" if "lr_plus" in final_models else None)
@@ -2720,6 +3343,7 @@ def train_and_evaluate(
         "market_df": market_df,
         "market_training_coverage": market_coverage,
         "market_residual_models_enabled": residual_enabled,
+        "market_residual_info": market_residual_info,
         "manual_df": manual_df,
         "field_context": field_context,
         "field_reweight_info": field_reweight_info,
@@ -2756,6 +3380,18 @@ def train_and_evaluate(
         "adaptive_market_blend_config": {} if adaptive_market_blend is None else {
             key: adaptive_market_blend[key]
             for key in ["base_weight", "close_seed_threshold", "close_weight", "wide_seed_threshold", "wide_weight"]
+        },
+        "women_chalk_extremes": women_chalk_extremes,
+        "women_chalk_extremes_best_cv": None if women_chalk_extremes is None else women_chalk_extremes["best_cv_brier"],
+        "women_chalk_extremes_config": {} if women_chalk_extremes is None else {
+            key: women_chalk_extremes[key]
+            for key in ["top_seed_max", "dog_seed_min", "floor_prob", "max_round", "require_host_likely"]
+        },
+        "women_dual_chalk_extremes": women_dual_chalk_extremes,
+        "women_dual_chalk_extremes_best_cv": None if women_dual_chalk_extremes is None else women_dual_chalk_extremes["best_cv_brier"],
+        "women_dual_chalk_extremes_config": {} if women_dual_chalk_extremes is None else {
+            "primary_config": women_dual_chalk_extremes["primary_config"],
+            "secondary_config": women_dual_chalk_extremes["secondary_config"],
         },
     }
     append_benchmark(run_id, bundle, matchups)
@@ -2809,6 +3445,8 @@ def build_prediction_frame(
     frame = frame.merge(t2f, on=["Season", "T2"], how="left")
     frame, _ = compute_diff_features(frame, feature_candidates)
     frame, _ = add_matchup_context_features(frame)
+    if gender == "W":
+        frame, _ = add_women_tourney_structure_features(frame)
     if market_df is not None and not market_df.empty:
         frame, _, _ = merge_market_features(frame, market_df)
     if signal_df is not None and not signal_df.empty:
@@ -2854,6 +3492,11 @@ def postprocess_predictions(bundle: dict[str, object], pred_df: pd.DataFrame, pr
             if active.any():
                 market_prob = safe_clip(pred_df.loc[active, "MarketProb"].to_numpy())
                 adjusted[active] = safe_clip((1.0 - row_weights[active]) * adjusted[active] + row_weights[active] * market_prob)
+
+    if gender == "W" and bundle.get("women_chalk_extremes"):
+        adjusted = apply_women_chalk_rule_array(pred_df, adjusted, bundle["women_chalk_extremes"])
+    if gender == "W" and bundle.get("women_dual_chalk_extremes"):
+        adjusted = apply_women_chalk_rule_array(pred_df, adjusted, bundle["women_dual_chalk_extremes"]["secondary_config"])
 
     return safe_clip(adjusted)
 
