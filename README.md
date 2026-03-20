@@ -4,6 +4,26 @@
 
 这个项目不是单一模型脚本，而是一套完整的锦标赛预测系统。它覆盖了从外部数据抓取、结构化特征构建、模型训练、概率融合、赛前运行时调整，到最终提交文件校验与发布的完整闭环。
 
+## 快速入口
+
+- 英文 README：[README.en.md](README.en.md)
+- 中文入口说明：[README.zh-CN.md](README.zh-CN.md)
+- 开源许可证：[MIT License](LICENSE)
+
+## 项目图示
+
+### 系统架构
+
+![System Architecture](docs/assets/system-architecture.svg)
+
+### 历史 CV 趋势
+
+![Historical CV Brier Trend](docs/assets/cv-trend.svg)
+
+### 爆冷场景压力测试
+
+![Upset Scenario Brier](docs/assets/upset-scenarios.svg)
+
 ## 1. 项目概览
 
 系统的核心目标是：
@@ -389,19 +409,28 @@ $env:HERHOOPSTATS_PASSWORD="your_password"
 - 完整代码结构
 - 训练 / 预测 / 刷新 / 提交流水线
 - 中文主 README
-- GitHub 上传前的数据忽略规则
+- GitHub 友好的数据忽略规则
+- 中英文 README
+- README 图表与架构图
 
-如果要真正推送到 GitHub，还需要：
-
-- 一个目标仓库地址
-- 当前机器上可用的 GitHub 认证方式（PAT / SSH key / 已登录的 Git 凭证）
+当前已经可以作为公开项目仓库直接浏览与分享。
 
 ## 16. License
 
-当前仓库未单独附加开源许可证。
+本项目采用 [MIT License](LICENSE)。
 
-如果要公开发布到 GitHub，建议在上传前根据你的用途补充：
+## 17. README 图表生成
 
-- MIT
-- Apache-2.0
-- 或仅保留私有仓库
+为了让 GitHub 首页更直观，仓库提供了一个无额外依赖的 SVG 生成脚本：
+
+```powershell
+.\.venv\Scripts\python.exe tools\build_readme_figures.py
+```
+
+它会基于当前仓库已有结果文件生成：
+
+- `docs/assets/system-architecture.svg`
+- `docs/assets/cv-trend.svg`
+- `docs/assets/upset-scenarios.svg`
+
+如果你更新了评估结果或想重新发布首页图表，重新运行一次即可。
