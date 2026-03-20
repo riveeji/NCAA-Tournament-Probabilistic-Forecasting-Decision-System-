@@ -5,6 +5,8 @@
 ![Status](https://img.shields.io/badge/Status-Active%20Project-0f766e)
 [![GitHub Repo](https://img.shields.io/badge/GitHub-Repository-181717?logo=github&logoColor=white)](https://github.com/riveeji/NCAA-Tournament-Probabilistic-Forecasting-Decision-System-)
 
+![Project Banner](docs/assets/project-banner.svg)
+
 An end-to-end forecasting, decision, and submission pipeline for Kaggle NCAA March Machine Learning Mania.
 
 This project is not a single notebook or a one-off model export. It is a full tournament forecasting system that covers:
@@ -25,6 +27,16 @@ This repository is stronger than a typical competition notebook because it combi
 - cross-source ingestion from messy real-world feeds
 - replay / CV / scenario-based evaluation
 - a release workflow with recommendation, sanity checks, and artifact tracking
+
+## Why Star This Repo
+
+- It is a full **submission-ready forecasting system**, not just a training notebook
+- It combines **sportsbook odds, prediction markets, external matchup models, and structured team signals**
+- It supports both **men's and women's** tournament forecasting in one pipeline
+- It includes **decision-layer logic, release validation, and reproducible artifacts**
+- It is useful both as a Kaggle competition repo and as a practical ML systems portfolio project
+
+If this repo is useful for your Kaggle workflow, sports analytics learning, or ML systems portfolio, consider giving it a star.
 
 ## Highlights
 
@@ -105,6 +117,7 @@ This project demonstrates:
 - Figures shown in the README are generated from tracked artifacts via `tools/build_readme_figures.py`.
 - The Chinese homepage README is in [README.md](README.md).
 - Chinese interview notes are in [docs/INTERVIEW_NOTES.zh-CN.md](docs/INTERVIEW_NOTES.zh-CN.md).
+- GitHub growth and sharing notes are in [docs/GITHUB_GROWTH_PLAYBOOK.zh-CN.md](docs/GITHUB_GROWTH_PLAYBOOK.zh-CN.md).
 
 ## License
 

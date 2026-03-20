@@ -77,6 +77,51 @@ def build_architecture_svg() -> None:
     (ASSETS / "system-architecture.svg").write_text("".join(parts), encoding="utf-8")
 
 
+def build_banner_svg() -> None:
+    width, height = 1400, 420
+    parts = [svg_header(width, height)]
+    parts.append('<defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">'
+                 '<stop offset="0%" stop-color="#0f172a"/>'
+                 '<stop offset="55%" stop-color="#134e4a"/>'
+                 '<stop offset="100%" stop-color="#2563eb"/>'
+                 '</linearGradient></defs>')
+    parts.append(f'<rect width="{width}" height="{height}" fill="url(#bg)"/>')
+    parts.append('<circle cx="1180" cy="70" r="120" fill="#ffffff" fill-opacity="0.06"/>')
+    parts.append('<circle cx="1280" cy="320" r="170" fill="#ffffff" fill-opacity="0.04"/>')
+    parts.append(
+        '<text x="58" y="98" fill="#e2e8f0" font-size="18" font-family="Arial, sans-serif" font-weight="700">'
+        "Kaggle NCAA March Machine Learning Mania</text>"
+    )
+    parts.append(
+        '<text x="58" y="168" fill="#ffffff" font-size="42" font-family="Arial, sans-serif" font-weight="700">'
+        "NCAA Tournament Probabilistic Forecasting</text>"
+    )
+    parts.append(
+        '<text x="58" y="216" fill="#ffffff" font-size="42" font-family="Arial, sans-serif" font-weight="700">'
+        "& Decision System</text>"
+    )
+    parts.append(
+        '<text x="58" y="268" fill="#cbd5e1" font-size="22" font-family="Arial, sans-serif">'
+        "Multi-source odds, prediction markets, external ratings, meta fusion, and release-safe submission workflows</text>"
+    )
+    chips = [
+        (58, 314, "Odds + Markets"),
+        (282, 314, "Men + Women"),
+        (468, 314, "Stacking + Goldshot"),
+        (728, 314, "Replay + Scenario Simulation"),
+    ]
+    for x, y, text in chips:
+        width_chip = 170 + len(text) * 3
+        parts.append(
+            f'<rect x="{x}" y="{y}" width="{width_chip}" height="42" rx="21" fill="#ffffff" fill-opacity="0.14" stroke="#ffffff" stroke-opacity="0.2"/>'
+        )
+        parts.append(
+            f'<text x="{x + 18}" y="{y + 27}" fill="#f8fafc" font-size="17" font-family="Arial, sans-serif" font-weight="700">{text}</text>'
+        )
+    parts.append("</svg>")
+    (ASSETS / "project-banner.svg").write_text("".join(parts), encoding="utf-8")
+
+
 def read_csv(path: Path) -> list[dict[str, str]]:
     with path.open("r", encoding="utf-8", newline="") as fh:
         return list(csv.DictReader(fh))
@@ -238,6 +283,7 @@ def build_upset_scenarios_svg() -> None:
 
 def main() -> None:
     ensure_assets()
+    build_banner_svg()
     build_architecture_svg()
     build_cv_trend_svg()
     build_upset_scenarios_svg()

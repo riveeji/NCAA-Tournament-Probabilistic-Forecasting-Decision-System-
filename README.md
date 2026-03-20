@@ -5,6 +5,8 @@
 ![Status](https://img.shields.io/badge/Status-Active%20Project-0f766e)
 [![GitHub Repo](https://img.shields.io/badge/GitHub-Repository-181717?logo=github&logoColor=white)](https://github.com/riveeji/NCAA-Tournament-Probabilistic-Forecasting-Decision-System-)
 
+![Project Banner](docs/assets/project-banner.svg)
+
 面向 Kaggle NCAA March Machine Learning Mania 的多源数据融合、概率建模、自动化决策与提交流水线。
 
 这个项目不是单一模型脚本，而是一套完整的锦标赛预测系统。它覆盖了从外部数据抓取、结构化特征构建、模型训练、概率融合、赛前运行时调整，到最终提交文件校验与发布的完整闭环。
@@ -15,6 +17,17 @@
 - 中文入口说明：[README.zh-CN.md](README.zh-CN.md)
 - 开源许可证：[MIT License](LICENSE)
 - 面试话术与项目亮点：[docs/INTERVIEW_NOTES.zh-CN.md](docs/INTERVIEW_NOTES.zh-CN.md)
+- GitHub 增长与分享文案：[docs/GITHUB_GROWTH_PLAYBOOK.zh-CN.md](docs/GITHUB_GROWTH_PLAYBOOK.zh-CN.md)
+
+## 为什么值得 Star
+
+- 这不是单一 notebook，而是**完整的端到端概率预测系统**
+- 同时覆盖 **男篮 + 女篮**，并直接面向 Kaggle 官方 submission 空间
+- 把 **sportsbook odds、prediction markets、external ratings、manual supplements** 统一到一条预测链路
+- 不只做建模，还做了 **final recommendation、sanity check、hash 校验、发布流程**
+- 既适合 Kaggle 竞赛复盘，也适合作为 **机器学习系统 / 数据工程 / 概率预测** 项目的参考模板
+
+如果这个仓库对你的 Kaggle 工作流、体育分析学习或机器学习项目搭建有帮助，欢迎给个 Star。
 
 ## 项目图示
 
@@ -438,5 +451,6 @@ $env:HERHOOPSTATS_PASSWORD="your_password"
 - `docs/assets/system-architecture.svg`
 - `docs/assets/cv-trend.svg`
 - `docs/assets/upset-scenarios.svg`
+- `docs/assets/project-banner.svg`
 
 如果你更新了评估结果或想重新发布首页图表，重新运行一次即可。
