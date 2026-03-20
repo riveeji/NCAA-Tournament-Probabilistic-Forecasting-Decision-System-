@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 from pathlib import Path
 import re
 from typing import Optional
@@ -11,8 +12,21 @@ import pandas as pd
 DATA_DIR = Path(__file__).resolve().parent / "ncaa-data"
 EXTERNAL_DIR = Path(__file__).resolve().parent / "external-data"
 POLL_SYSTEMS = frozenset({"AP", "USA", "DES"})
-EXTERNAL_SKIP_TOKENS = ("manual", "signal", "odds", "market", "template", "example")
+EXTERNAL_SKIP_TOKENS = ("manual", "signal", "odds", "market", "template", "example", "silverbulletin")
 EXTERNAL_RATING_NEGATIVE_TOKENS = ("adjd", "defrtg", "deff", "defense", "allowed")
+PRE_TOURNEY_RATING_REQUIRED_COLUMNS = frozenset({"Season", "SnapshotDate", "Source", "VerifiedPreTourney"})
+PRE_TOURNEY_RATING_META_COLUMNS = PRE_TOURNEY_RATING_REQUIRED_COLUMNS | frozenset({"TeamName"})
+HISTORICAL_TEAM_RATINGS_SAFE_COLUMNS = frozenset({
+    "Games",
+    "FallbackGames",
+    "FallbackElo",
+    "FallbackSOS",
+    "FallbackOWP",
+    "FallbackRPIStyle",
+    "FallbackRPIStyleSOS",
+    "FallbackWinRate",
+    "FallbackAvgMargin",
+})
 POSSESSION_FTA_COEF = 0.475
 COMMON_TEAM_ALIASES = {
     "ar pine bluff": "ark pine bluff",
@@ -23,7 +37,10 @@ COMMON_TEAM_ALIASES = {
     "lmu ca": "loy marymount",
     "loyola chi": "loyola chicago",
     "miami": "miami fl",
+    "miami university oh": "miami oh",
+    "u miami fl": "miami fl",
     "niu": "n illinois",
+    "mississippi valley st": "mississippi valley state",
     "ole miss": "mississippi",
     "presbyterian college": "presbyterian",
     "queens": "queens nc",
@@ -32,6 +49,7 @@ COMMON_TEAM_ALIASES = {
     "saint thomas": "st thomas mn",
     "seattle university": "seattle",
     "southeast missouri": "se missouri st",
+    "southeast missouri st": "se missouri st",
     "southern ind": "southern indiana",
     "ualbany": "suny albany",
     "uiw": "incarnate word",
@@ -39,6 +57,7 @@ COMMON_TEAM_ALIASES = {
     "ucf": "central florida",
     "unc": "north carolina",
     "uta": "ut arlington",
+    "ut rio grande valley": "texas rio grande valley",
     "vcu": "virginia commonwealth",
     "west ga": "west georgia",
 }
@@ -142,6 +161,71 @@ def standardize_external_team_frame(df: pd.DataFrame, gender: str, data_dir: Opt
 def should_skip_external_file(path: Path) -> bool:
     lowered = path.name.lower()
     return any(token in lowered for token in EXTERNAL_SKIP_TOKENS)
+
+
+def historical_team_ratings_numeric_columns(path: Path, numeric_cols: list[str]) -> list[str]:
+    lowered = path.name.lower()
+    if "historicalteamratingspretourney" in lowered:
+        return [column for column in numeric_cols if column not in PRE_TOURNEY_RATING_META_COLUMNS]
+    if "historicalteamratings" not in lowered:
+        return numeric_cols
+    return [column for column in numeric_cols if column in HISTORICAL_TEAM_RATINGS_SAFE_COLUMNS]
+
+
+def tourney_snapshot_cutoff_lookup(gender: str, data_dir: Optional[Path] = None) -> dict[int, pd.Timestamp]:
+    root = Path(data_dir) if data_dir is not None else DATA_DIR
+    seasons_path = root / f"{gender}Seasons.csv"
+    tourney_path = root / f"{gender}NCAATourneyCompactResults.csv"
+    if not seasons_path.exists() or not tourney_path.exists():
+        return {}
+
+    seasons_df = pd.read_csv(seasons_path, usecols=["Season", "DayZero"])
+    tourney_df = pd.read_csv(tourney_path, usecols=["Season", "DayNum"])
+    if seasons_df.empty or tourney_df.empty:
+        return {}
+
+    first_tourney_day = tourney_df.groupby("Season", as_index=True)["DayNum"].min()
+    cutoff_dates: dict[int, pd.Timestamp] = {}
+    for row in seasons_df.itertuples(index=False):
+        season = int(row.Season)
+        if season not in first_tourney_day.index:
+            continue
+        first_day = int(first_tourney_day.loc[season])
+        cutoff_day = max(first_day - 2, 1)
+        day_zero = pd.to_datetime(row.DayZero, errors="coerce", utc=True)
+        if pd.isna(day_zero):
+            continue
+        cutoff_dates[season] = day_zero + pd.to_timedelta(cutoff_day, unit="D")
+    return cutoff_dates
+
+
+def is_verified_pretourney_snapshot_file(path: Path) -> bool:
+    return "historicalteamratingspretourney" in path.name.lower()
+
+
+def filter_verified_pretourney_snapshot_frame(
+    df: pd.DataFrame,
+    gender: str,
+    data_dir: Optional[Path] = None,
+) -> pd.DataFrame:
+    if df.empty:
+        return df
+    if not PRE_TOURNEY_RATING_REQUIRED_COLUMNS.issubset(df.columns):
+        return df.iloc[0:0].copy()
+
+    frame = df.copy()
+    frame["Season"] = pd.to_numeric(frame["Season"], errors="coerce")
+    frame["VerifiedPreTourney"] = pd.to_numeric(frame["VerifiedPreTourney"], errors="coerce").fillna(0).astype(int)
+    frame["SnapshotDate"] = pd.to_datetime(frame["SnapshotDate"], errors="coerce", utc=True)
+    frame = frame.dropna(subset=["Season", "SnapshotDate"]).copy()
+    if frame.empty:
+        return frame
+
+    frame["Season"] = frame["Season"].astype(int)
+    cutoff_lookup = tourney_snapshot_cutoff_lookup(gender, data_dir=data_dir)
+    cutoff_series = frame["Season"].map(cutoff_lookup)
+    valid_mask = frame["VerifiedPreTourney"].eq(1) & cutoff_series.notna() & frame["SnapshotDate"].le(cutoff_series)
+    return frame.loc[valid_mask].reset_index(drop=True)
 
 
 def season_zscore(df: pd.DataFrame, column: str) -> pd.Series:
@@ -376,7 +460,10 @@ def aggregate_efficiency_rows(games: pd.DataFrame, prefix: str = "") -> pd.DataF
 
 def resolve_detailed_games(detailed_df: Optional[pd.DataFrame] = None, games: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     if games is not None:
-        return games.copy()
+        # Reuse the prebuilt detailed game log as read-only input. The downstream
+        # efficiency helpers sort/filter into new frames and do not mutate `games`
+        # in place, so copying this 200k+ row table repeatedly only wastes memory.
+        return games
     if detailed_df is None or detailed_df.empty:
         return pd.DataFrame()
     return build_detailed_game_log(detailed_df)
@@ -389,7 +476,7 @@ def compute_efficiency(detailed_df: Optional[pd.DataFrame] = None, games: Option
     agg = aggregate_efficiency_rows(games)
 
     if "IsHome" in games.columns:
-        neutral = games[games["IsHome"] == 0].copy()
+        neutral = games.loc[games["IsHome"] == 0]
         if not neutral.empty:
             neutral_spec = {
                 "NeutralOffRtg": ("OffRtg", "mean"),
@@ -426,7 +513,7 @@ def compute_recent_efficiency(
     if games.empty:
         return pd.DataFrame(columns=["Season", "TeamID"])
     games = games.sort_values(["Season", "TeamID", "DayNum"])
-    recent = games.groupby(["Season", "TeamID"]).tail(n_games).copy()
+    recent = games.groupby(["Season", "TeamID"]).tail(n_games)
     return aggregate_efficiency_rows(recent, prefix="RecentEff")
 
 
@@ -441,7 +528,7 @@ def compute_recent_efficiency_window(
         return pd.DataFrame(columns=["Season", "TeamID"])
     games = games.sort_values(["Season", "TeamID", "DayNum"])
     season_last_day = games.groupby("Season")["DayNum"].transform("max")
-    recent = games[games["DayNum"] >= (season_last_day - lookback_days)].copy()
+    recent = games.loc[games["DayNum"] >= (season_last_day - lookback_days)]
     if recent.empty:
         return pd.DataFrame(columns=["Season", "TeamID"])
     return aggregate_efficiency_rows(recent, prefix=prefix)
@@ -552,20 +639,21 @@ def compute_massey_features(massey_df: pd.DataFrame, key_systems=("KPK", "POM", 
     if massey_df.empty:
         return empty
 
-    df = massey_df[massey_df["RankingDayNum"] <= max_day].copy()
+    base_cols = ["Season", "TeamID", "SystemName", "OrdinalRank", "RankingDayNum"]
+    df = massey_df.loc[massey_df["RankingDayNum"] <= max_day, base_cols]
     if df.empty:
         return empty
-    df = df[~df["SystemName"].isin(POLL_SYSTEMS)].copy()
+    df = df.loc[~df["SystemName"].isin(POLL_SYSTEMS)]
     if df.empty:
         return empty
 
-    latest_idx = df.groupby(["Season", "TeamID", "SystemName"])["RankingDayNum"].idxmax()
-    latest = df.loc[latest_idx].copy()
-    latest["Pct"] = latest.groupby(["Season", "SystemName"])["OrdinalRank"].rank(pct=True)
-    consensus = latest.groupby(["Season", "TeamID"])["Pct"].agg(MasseyMean="mean", MasseyStd="std", MasseyMin="min").reset_index()
+    latest_idx = df.groupby(["Season", "TeamID", "SystemName"], observed=True)["RankingDayNum"].idxmax()
+    latest = df.loc[latest_idx, ["Season", "TeamID", "SystemName", "OrdinalRank"]].copy()
+    latest["Pct"] = latest.groupby(["Season", "SystemName"], observed=True)["OrdinalRank"].rank(pct=True)
+    consensus = latest.groupby(["Season", "TeamID"], observed=True)["Pct"].agg(MasseyMean="mean", MasseyStd="std", MasseyMin="min").reset_index()
     consensus["MasseyStd"] = consensus["MasseyStd"].fillna(0.0)
 
-    key_df = latest[latest["SystemName"].isin(key_systems)].copy()
+    key_df = latest.loc[latest["SystemName"].isin(key_systems), ["Season", "TeamID", "SystemName", "OrdinalRank"]]
     if key_df.empty:
         return consensus
 
@@ -580,22 +668,23 @@ def compute_massey_momentum(massey_df: pd.DataFrame, latest_day: int = 133, look
     if massey_df.empty:
         return empty
 
-    df = massey_df[~massey_df["SystemName"].isin(POLL_SYSTEMS)].copy()
+    base_cols = ["Season", "TeamID", "SystemName", "OrdinalRank", "RankingDayNum"]
+    df = massey_df.loc[~massey_df["SystemName"].isin(POLL_SYSTEMS), base_cols]
     if df.empty:
         return empty
 
-    latest_cut = df[df["RankingDayNum"] <= latest_day].copy()
-    previous_cut = df[df["RankingDayNum"] <= latest_day - lookback_days].copy()
+    latest_cut = df.loc[df["RankingDayNum"] <= latest_day]
+    previous_cut = df.loc[df["RankingDayNum"] <= latest_day - lookback_days]
     if latest_cut.empty or previous_cut.empty:
         return empty
 
-    latest_idx = latest_cut.groupby(["Season", "TeamID", "SystemName"])["RankingDayNum"].idxmax()
-    previous_idx = previous_cut.groupby(["Season", "TeamID", "SystemName"])["RankingDayNum"].idxmax()
-    latest = latest_cut.loc[latest_idx].copy()
-    previous = previous_cut.loc[previous_idx].copy()
+    latest_idx = latest_cut.groupby(["Season", "TeamID", "SystemName"], observed=True)["RankingDayNum"].idxmax()
+    previous_idx = previous_cut.groupby(["Season", "TeamID", "SystemName"], observed=True)["RankingDayNum"].idxmax()
+    latest = latest_cut.loc[latest_idx, ["Season", "TeamID", "SystemName", "OrdinalRank"]].copy()
+    previous = previous_cut.loc[previous_idx, ["Season", "TeamID", "SystemName", "OrdinalRank"]].copy()
 
-    latest["PctNow"] = latest.groupby(["Season", "SystemName"])["OrdinalRank"].rank(pct=True)
-    previous["PctPrev"] = previous.groupby(["Season", "SystemName"])["OrdinalRank"].rank(pct=True)
+    latest["PctNow"] = latest.groupby(["Season", "SystemName"], observed=True)["OrdinalRank"].rank(pct=True)
+    previous["PctPrev"] = previous.groupby(["Season", "SystemName"], observed=True)["OrdinalRank"].rank(pct=True)
 
     latest = latest[["Season", "TeamID", "SystemName", "PctNow"]]
     previous = previous[["Season", "TeamID", "SystemName", "PctPrev"]]
@@ -790,25 +879,39 @@ def load_external_team_features(gender: str, external_dir: Optional[Path] = None
             seen.add(path.name)
             unique_paths.append(path)
 
+    path_names = {path.name.lower() for path in unique_paths}
+    has_pretourney_historical = any("historicalteamratingspretourney" in name for name in path_names)
+
     merged = None
     for path in unique_paths:
         if should_skip_external_file(path):
+            continue
+        lowered = path.name.lower()
+        if has_pretourney_historical and lowered.endswith("historicalteamratings.csv"):
             continue
         try:
             df = pd.read_csv(path)
         except Exception:
             continue
+        if is_verified_pretourney_snapshot_file(path):
+            df = filter_verified_pretourney_snapshot_frame(df, gender, data_dir=data_dir)
+            if df.empty:
+                continue
         df = standardize_external_team_frame(df, gender, data_dir=data_dir)
         if df.empty:
             continue
 
+        numeric_cols = [
+            column for column in df.columns
+            if column not in {"Season", "TeamID"} and pd.api.types.is_numeric_dtype(df[column])
+        ]
+        numeric_cols = historical_team_ratings_numeric_columns(path, numeric_cols)
+        if not numeric_cols:
+            continue
+
         keep = ["Season", "TeamID"]
         rename_map = {}
-        for column in df.columns:
-            if column in {"Season", "TeamID"}:
-                continue
-            if not pd.api.types.is_numeric_dtype(df[column]):
-                continue
+        for column in numeric_cols:
             keep.append(column)
             rename_map[column] = column if column.startswith("Ext_") else f"Ext_{column}"
 
@@ -1041,6 +1144,9 @@ def build_team_features(
     eff_df = compute_efficiency(games=detailed_games) if not detailed_games.empty else pd.DataFrame()
     recent_eff_df = compute_recent_efficiency(games=detailed_games) if not detailed_games.empty else pd.DataFrame()
     recent30_eff_df = compute_recent_efficiency_window(games=detailed_games) if not detailed_games.empty else pd.DataFrame()
+    del detailed_games
+    del detailed_df
+    gc.collect()
 
     conf_tourney_path = competition_path(f"{prefix}ConferenceTourneyGames.csv", data_dir)
     conf_wins_df = compute_conf_tourney(pd.read_csv(conf_tourney_path)) if conf_tourney_path.exists() else pd.DataFrame(columns=["Season", "TeamID", "ConfTourneyWins"])
@@ -1048,9 +1154,21 @@ def build_team_features(
     if gender == "M":
         massey_path = competition_path("MMasseyOrdinals.csv", data_dir)
         if massey_path.exists():
-            massey_df = pd.read_csv(massey_path)
+            massey_df = pd.read_csv(
+                massey_path,
+                usecols=["Season", "RankingDayNum", "SystemName", "TeamID", "OrdinalRank"],
+                dtype={
+                    "Season": "int16",
+                    "RankingDayNum": "int16",
+                    "SystemName": "category",
+                    "TeamID": "int32",
+                    "OrdinalRank": "int16",
+                },
+            )
             rank_df = compute_massey_features(massey_df)
             massey_momentum_df = compute_massey_momentum(massey_df)
+            del massey_df
+            gc.collect()
         else:
             rank_df = pd.DataFrame()
             massey_momentum_df = pd.DataFrame(columns=["Season", "TeamID", "MasseyMomentum"])

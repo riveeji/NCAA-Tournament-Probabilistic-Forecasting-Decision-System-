@@ -1,0 +1,4 @@
+pyarrow>=23.0.0
+sentence-transformers>=5.1.0
+transformers>=4.57.0
+tabpfn>=2.2.1

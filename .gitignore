@@ -1,4 +1,6 @@
 .venv/
+.cache/
+.vscode/
 __pycache__/
 *.pyc
 
@@ -11,3 +13,6 @@ results/*
 submission_stage1.csv
 submission_stage2.csv
 submission_stage2_single_final.csv
+submission_stage2_single_final_hc.csv
+submission_stage2_single_final_hc_*.csv
+submission_stage2_single_final_hc_clean.csv
