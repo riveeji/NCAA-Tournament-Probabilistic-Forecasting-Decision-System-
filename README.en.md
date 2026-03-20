@@ -1,5 +1,10 @@
 # NCAA Tournament Probabilistic Forecasting & Decision System
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+![Status](https://img.shields.io/badge/Status-Active%20Project-0f766e)
+[![GitHub Repo](https://img.shields.io/badge/GitHub-Repository-181717?logo=github&logoColor=white)](https://github.com/riveeji/NCAA-Tournament-Probabilistic-Forecasting-Decision-System-)
+
 An end-to-end forecasting, decision, and submission pipeline for Kaggle NCAA March Machine Learning Mania.
 
 This project is not a single notebook or a one-off model export. It is a full tournament forecasting system that covers:
@@ -10,6 +15,16 @@ This project is not a single notebook or a one-off model export. It is a full to
 - runtime market-aware adjustments
 - candidate submission generation and recommendation
 - sanity checks, hashing, and release artifacts
+
+## Why This Project Is Interesting
+
+This repository is stronger than a typical competition notebook because it combines:
+
+- a full submission-space probability engine
+- market-aware decision logic close to lock time
+- cross-source ingestion from messy real-world feeds
+- replay / CV / scenario-based evaluation
+- a release workflow with recommendation, sanity checks, and artifact tracking
 
 ## Highlights
 
@@ -74,11 +89,22 @@ Run the Selection Sunday pipeline:
 .\.venv\Scripts\python.exe tools\run_selection_sunday_pipeline.py
 ```
 
+## Recruiting-Oriented Summary
+
+This project demonstrates:
+
+- end-to-end machine learning system design
+- probabilistic forecasting and calibration
+- multi-source data engineering under unstable external inputs
+- practical decision-layer design instead of model-only experimentation
+- reproducible release workflows for high-pressure submission windows
+
 ## Notes
 
 - The public GitHub version excludes large local data folders and result dumps by default.
 - Figures shown in the README are generated from tracked artifacts via `tools/build_readme_figures.py`.
 - The Chinese homepage README is in [README.md](README.md).
+- Chinese interview notes are in [docs/INTERVIEW_NOTES.zh-CN.md](docs/INTERVIEW_NOTES.zh-CN.md).
 
 ## License
 

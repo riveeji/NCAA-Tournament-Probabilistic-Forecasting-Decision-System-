@@ -1,5 +1,10 @@
 # NCAA Tournament Probabilistic Forecasting & Decision System
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+![Status](https://img.shields.io/badge/Status-Active%20Project-0f766e)
+[![GitHub Repo](https://img.shields.io/badge/GitHub-Repository-181717?logo=github&logoColor=white)](https://github.com/riveeji/NCAA-Tournament-Probabilistic-Forecasting-Decision-System-)
+
 面向 Kaggle NCAA March Machine Learning Mania 的多源数据融合、概率建模、自动化决策与提交流水线。
 
 这个项目不是单一模型脚本，而是一套完整的锦标赛预测系统。它覆盖了从外部数据抓取、结构化特征构建、模型训练、概率融合、赛前运行时调整，到最终提交文件校验与发布的完整闭环。
@@ -9,6 +14,7 @@
 - 英文 README：[README.en.md](README.en.md)
 - 中文入口说明：[README.zh-CN.md](README.zh-CN.md)
 - 开源许可证：[MIT License](LICENSE)
+- 面试话术与项目亮点：[docs/INTERVIEW_NOTES.zh-CN.md](docs/INTERVIEW_NOTES.zh-CN.md)
 
 ## 项目图示
 
