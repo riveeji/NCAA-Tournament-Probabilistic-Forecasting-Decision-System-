@@ -1,0 +1,7 @@
+gender,route,model_variant,learner_family,market_mode,feature_pack,calibration_mode,gender_profile,mean_brier,latest_season,latest_season_brier,recent_window_brier,brier_variance,sportsbook_coverage_mean,prediction_market_coverage_mean
+M,spread,lr,linear,none,base,basecal,M_base,0.18399693388643854,2025,0.14779336581007185,0.19750756808515768,0.0002939533720521325,0.07200927182270465,0.0
+W,spread,lr,linear,none,base,basecal,W_base,0.13900899723593374,2025,0.10713258583909056,0.13777591470582845,0.00039760644612593237,0.04754007739082366,0.0
+M,spread,lr,linear,none,external_base_pruned,basecal,men_external_pruned,0.18527810892675972,2025,0.14607588405359678,0.2049453143010827,0.00037138814143128335,0.07200927182270465,0.0
+W,spread,lr,linear,none,external_base_pruned,basecal,women_external_pruned,0.1419590978265131,2025,0.11777749726138577,0.13868677770172452,0.00036222302137609876,0.04754007739082366,0.0
+M,spread,lr,linear,sportsbook,external_base_pruned,basecal,men_external_pruned,0.18516712182558223,2025,0.1448289838023001,0.20405741749166267,0.00036858900014572664,0.07200927182270465,0.0
+W,spread,lr,linear,sportsbook,external_base_pruned,basecal,women_external_pruned,0.14195481494656126,2025,0.11649450958636634,0.13866365014998447,0.00036406032591150864,0.04754007739082366,0.0

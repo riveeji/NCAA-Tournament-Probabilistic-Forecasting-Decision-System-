@@ -1,0 +1,206 @@
+{
+  "plan_name": "JI_base_next_steps",
+  "updated_at": "2026-04-11",
+  "owner": "Codex",
+  "language": "zh-CN",
+  "scope": "JI_base long-term core only",
+  "current_state": {
+    "active_core": "JI_base",
+    "best_ji_base_variant": "JI_lr_control@none",
+    "best_total_cv_brier_calibrated": 0.164156,
+    "best_total_cv_brier_raw": 0.164165,
+    "official_lb_best_score": 0.1289,
+    "official_lb_best_submission_profile": "gold_recover_market",
+    "ji_base_upgrade_gate_passed": false,
+    "notes": [
+      "JI_base 目前是长期主线，不包含 overlay、market、injury、futures。",
+      "JI_base 当前还没有超过现有强基线，后续工作应以 replay-first 为主。"
+    ]
+  },
+  "priorities": [
+    {
+      "priority": 1,
+      "title": "提升 women 质量层",
+      "goal": "改进 women composite quality，使 women_cv_brier_calibrated 明显下降。",
+      "why": [
+        "women 侧仍是 JI_base 最明显的结构性短板。",
+        "第二名公开复盘也明确指出 women composite ranking 是高价值缺口。"
+      ],
+      "tasks": [
+        "重构 women consensus quality builder，分离 women 与 men 的 quality 构造逻辑。",
+        "对 women 的 MOV / dominance / quality-wins 聚合加入保守非线性抑制，例如 log1p、sqrt、clip 或 winsorize。",
+        "保留 women schema 与 men 同构，但 women quality 的权重和缩放单独定义。"
+      ],
+      "success_criteria": [
+        "women_cv_brier_calibrated 下降。",
+        "total_cv_brier_calibrated 同步下降。",
+        "latest-season 与 recent-window 不出现明显回撤。"
+      ],
+      "do_not_do": [
+        "不要把 current-year injury、market、manual override 混进 women quality。",
+        "不要对 women 全部 Elo/Quality 做全局强扭曲。"
+      ]
+    },
+    {
+      "priority": 2,
+      "title": "主干特征做小步受控迭代",
+      "goal": "在不改变 JI_base 主体架构的前提下，降低 total_cv_brier_calibrated。",
+      "why": [
+        "当前主干已经成型，下一步应该做可解释、小范围的特征调整，而不是再换模型哲学。",
+        "spread-first spine 的收益更依赖高价值小改动，而不是继续扩模型家族。"
+      ],
+      "tasks": [
+        "试验少量高解释性交互，例如 Seed × Quality、Seed × women_consensus_quality。",
+        "对 EloProb、strength_blend 的配方做有限替换或微调。",
+        "逐项评估效率差分列，删除边际弱且增加噪声的列。"
+      ],
+      "success_criteria": [
+        "total_cv_brier_calibrated 下降。",
+        "men_cv_brier_calibrated 与 women_cv_brier_calibrated 中至少一侧有明确改善，另一侧不明显恶化。",
+        "特征变更保持可解释，不引入宽表失控。"
+      ],
+      "do_not_do": [
+        "不要重新引入自由大搜索。",
+        "不要增加新的 current-year 源。"
+      ]
+    },
+    {
+      "priority": 3,
+      "title": "拆解 alpha_profile 的真实贡献",
+      "goal": "确认 core_alpha_v1 中哪些增强是长期有效的，哪些只是噪声。",
+      "why": [
+        "当前 alpha 是整包默认开启的，但还没有做系统性 ablation。",
+        "必须先知道 harry_Rating、QualityWins、OpponentQualityTournamentRank、AvgBlkDiff 的单独价值，再决定默认组合。"
+      ],
+      "tasks": [
+        "分别跑 harry_Rating only、QualityWins/OpponentQualityTournamentRank only、women AvgBlkDiff only。",
+        "比较 alpha off、single-alpha、core_alpha_v1 的 6 项 CV Brier 指标。",
+        "保留明确有增益的 alpha，移除无效或高噪声项。"
+      ],
+      "success_criteria": [
+        "找到至少一个能稳定降低 total_cv_brier_calibrated 的 alpha 子集。",
+        "alpha 配置从“整包默认”变成“证据驱动的最小有效组合”。"
+      ],
+      "do_not_do": [
+        "不要把 men injury 或 market 信息伪装成 alpha 放进 JI_base。",
+        "不要只看单个 season 的好结果就固定默认。"
+      ]
+    },
+    {
+      "priority": 4,
+      "title": "优化 Margin 到 Probability 的映射",
+      "goal": "提升 raw probability 质量，减少后续 isotonic 的负担。",
+      "why": [
+        "当前 MarginProbabilityMapper 是正态/probit 风格的固定实现，仍有进一步优化空间。",
+        "如果 raw probability 更稳，calibration 层的收益会更清晰。"
+      ],
+      "tasks": [
+        "比较 gender-specific residual scale 与当前统一映射的差异。",
+        "尝试 season-window weighted residual scale。",
+        "验证 mapper 改动对 raw/calibrated 六项 Brier 的影响。"
+      ],
+      "success_criteria": [
+        "至少降低 total_cv_brier_raw。",
+        "不破坏概率单调性和 [0,1] 边界。",
+        "不会让 calibrated 指标整体恶化。"
+      ],
+      "do_not_do": [
+        "不要直接上复杂分布或黑盒概率映射。",
+        "不要让 isotonic 同时承担映射与校准两种职责。"
+      ]
+    },
+    {
+      "priority": 5,
+      "title": "重新评估校准层是否值得保留",
+      "goal": "判断 isotonic_gender 在 JI_base 上是否应继续作为默认候选。",
+      "why": [
+        "当前 replay 结果显示 isotonic 在 JI_base 上整体是负收益。",
+        "需要区分是 mapper 足够好，还是 nested isotonic 样本不足导致不稳。"
+      ],
+      "tasks": [
+        "提高 isotonic 的最小样本门槛，减少过拟合。",
+        "对比 none 与 isotonic_gender 的分性别收益。",
+        "如果 isotonic 始终负收益，则把 none 固定为默认校准模式。"
+      ],
+      "success_criteria": [
+        "校准策略选择有明确证据支撑。",
+        "避免为了‘流程完整’而保留负收益校准。"
+      ],
+      "do_not_do": [
+        "不要在 JI_base replay 中引入 sharpen。",
+        "不要用全局 OOF 拟合校准器。"
+      ]
+    },
+    {
+      "priority": 6,
+      "title": "提升 replay 迭代效率",
+      "goal": "降低多变体 replay 的运行成本，支持更高频率的严谨实验。",
+      "why": [
+        "当前多变体 replay 虽然能跑通，但耗时仍然高。",
+        "如果迭代成本太高，后续 women quality 和 alpha ablation 会被拖慢。"
+      ],
+      "tasks": [
+        "继续下沉 profile / dataset cache。",
+        "减少 replay 中重复的 inner-OOF 训练。",
+        "如需要，只引入 DuckDB 做 cache 和 artifact join，不改主逻辑。"
+      ],
+      "success_criteria": [
+        "多变体 replay 明显提速。",
+        "缓存不改变结果，只改变运行成本。"
+      ],
+      "do_not_do": [
+        "不要引入 PostgreSQL。",
+        "不要为了性能改动评估口径。"
+      ]
+    },
+    {
+      "priority": 7,
+      "title": "第一条架构多样性控制线：JI_node_control",
+      "goal": "在 JI_base 主干稳定后，增加一条误差结构不同的控制分支。",
+      "why": [
+        "长期上限不只来自单一主模型，还来自结构化的架构多样性。",
+        "NODE 的工程复杂度低于 TabR，更适合作为第一条实验分支。"
+      ],
+      "tasks": [
+        "复用 team_profile_v2 与相同评估口径，实现 JI_node_control。",
+        "只作为 control/experimental branch，不接管主线。",
+        "只有在 replay 明显增益时，才进入轻量 blend 候选。"
+      ],
+      "success_criteria": [
+        "提供与 XGB 不同的误差分布。",
+        "若进入 blend，能稳定带来小幅增益。"
+      ],
+      "do_not_do": [
+        "不要在 JI_base v1 未稳定前就把 NODE 升成主线。",
+        "不要同时引入 NODE 和 TabR。"
+      ]
+    },
+    {
+      "priority": 8,
+      "title": "未来单独实现 JI_base_overlay",
+      "goal": "在不污染长期主线的前提下，保留 current-year alpha 的扩展空间。",
+      "why": [
+        "market、injury、text/LLM 抽取信号对单年冲榜有价值，但不属于长期 replay 主线。",
+        "必须物理分离 JI_base 和 JI_base_overlay，避免再次走回 gold 的混算问题。"
+      ],
+      "tasks": [
+        "等 JI_base 主干稳定后，再设计 JI_base_overlay。",
+        "overlay 只接 current-year market、injury、LLM/text-derived structured signals。",
+        "与 JI_base 的 replay、summary、submission 结果分开存储。"
+      ],
+      "success_criteria": [
+        "JI_base 保持长期主线纯度。",
+        "JI_base_overlay 可以独立评估单年增益。"
+      ],
+      "do_not_do": [
+        "不要把 overlay 提前并入 JI_base。",
+        "不要用单年冲榜技巧反向污染长期模型选择。"
+      ]
+    }
+  ],
+  "top_3_now": [
+    "提升 women 质量层",
+    "主干特征做小步受控迭代",
+    "拆解 alpha_profile 的真实贡献"
+  ]
+}

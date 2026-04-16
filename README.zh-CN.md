@@ -1,9 +1,15 @@
 # 中文说明
 
-当前仓库以 [README.md](README.md) 作为主中文 README。
+当前中文主 README 在 [README.md](README.md)。
 
-之所以这样处理，是为了让 GitHub 首页直接展示完整中文文档，并避免双份 README 长期维护带来的不一致。
+如果你是从 GitHub 或本地 IDE 进入这个仓库，建议直接先看：
 
-如果你是从 IDE 中打开这个文件，请直接阅读：
+- [README.md](README.md)  
+  中文主说明，包含项目概览、系统图示、当前 frozen core、实验结论、仓库结构与复现边界
+- [README.en.md](README.en.md)  
+  英文版本
 
-- [README.md](README.md)
+进一步的阶段文档：
+
+- [docs/JI_BASE_PHASE_STATUS.md](docs/JI_BASE_PHASE_STATUS.md)
+- [docs/JI_NEXT_ARCH_PHASE1.md](docs/JI_NEXT_ARCH_PHASE1.md)
