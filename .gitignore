@@ -3,16 +3,24 @@
 .vscode/
 __pycache__/
 *.pyc
+.pytest_source_snapshots/
+.cache_embeddedviewer.js
+
+kaggle_assets/
+rna3d-work/
+rna3d-assets/
+submission.csv
+submission_stage*.csv
+submission_*.csv
+template_features.pt
 
 external-data/
 ncaa-data/
 
 results/*
-!results/combined_cv_summary_20260312T115339Z.json
-
-submission_stage1.csv
-submission_stage2.csv
-submission_stage2_single_final.csv
-submission_stage2_single_final_hc.csv
-submission_stage2_single_final_hc_*.csv
-submission_stage2_single_final_hc_clean.csv
+!results/postmortem_summary.json
+!results/postmortem_ablation_table.csv
+!results/postmortem_findings.md
+!results/v2_replay_summary.csv
+!results/v2_replay_summary.json
+!results/v2_replay_combined.csv

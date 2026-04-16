@@ -1,0 +1,190 @@
+{
+  "current_primary_metric": {
+    "M": 0.1593256307281499,
+    "W": 0.136611698859364
+  },
+  "systems_compared": [
+    "gold",
+    "hc_current",
+    "ji_base",
+    "old_ablation",
+    "v2"
+  ],
+  "old_current_equal_gender_mean_brier": 0.16027528186298307,
+  "v2_best_equal_gender_mean_brier": 0.1615029655611861,
+  "v2_best_current_year_season": 2025,
+  "v2_best_current_year_equal_gender_brier": 0.1274629758245812,
+  "v2_best_variant": "spread-linear:none@base+basecal",
+  "best_spread_linear_variant": "spread-linear:none@base+basecal",
+  "best_spread_tree_variant": null,
+  "best_external_base_variant": "spread-linear:sportsbook@external_base_pruned+basecal",
+  "best_external_base_pruned_variant": "spread-linear:sportsbook@external_base_pruned+basecal",
+  "best_external_base_m_variant": "spread-linear:sportsbook@external_base_pruned+basecal",
+  "best_external_base_w_variant": "spread-linear:sportsbook@external_base_pruned+basecal",
+  "best_strength_full_variant": null,
+  "best_strength_recent_variant": null,
+  "best_calibration_mode": "basecal",
+  "best_feature_pack": "base",
+  "spread_upgrade_gate_passed": false,
+  "strength_rebuild_gate_passed": false,
+  "gold_best_combined_variant": "gold_linear@none[current_default]",
+  "gold_harry_best_combined_variant": "gold_harry_lr@none[current_default]",
+  "gold_best_m_variant": "gold_xgb_spread_light@isotonic_gender",
+  "gold_best_w_variant": "gold_linear@isotonic_gender",
+  "gold_vs_old_hc_delta": 0.0014177210594981393,
+  "gold_vs_v2_delta": 0.00019003736129510895,
+  "gold_upgrade_gate_passed": false,
+  "ji_base_best_combined_variant": "core::lr_ratings_core_v2b",
+  "ji_base_vs_old_hc_delta": 0.0006084874757513736,
+  "ji_base_vs_gold_recover_delta": -0.0007832043918782616,
+  "ji_base_upgrade_gate_passed": false,
+  "official_lb_best_submission_profile": "ji_base_base",
+  "official_lb_best_score": 0.1231313,
+  "frozen_overlay_submission_profile": "ji_base_overlay_v1_men_best_women_direct_only_weight025",
+  "best_overlay_submission_profile": "ji_base_overlay_v1_men_best_women_direct_only_weight020",
+  "best_overlay_submission_score": 0.1271633,
+  "official_lb_log_rows": 18,
+  "overlay_submission_only_enabled": true,
+  "linear_vs_tree_delta": null,
+  "external_vs_internal_strength_delta": 0.0020580028248856075,
+  "next_year_overlay_enabled": true,
+  "overlay_guardrail_passed": true,
+  "overlay_mean_abs_delta_m": 0.0017514130980132627,
+  "overlay_mean_abs_delta_w": 1.7709794335031348e-05,
+  "next_year_overlay_metadata": {
+    "season": 2026,
+    "enabled": true,
+    "submission_profile": {
+      "M": "gold_recover_market",
+      "W": "gold_recover_market"
+    },
+    "candidate_outputs": {
+      "gold_recover_base": "results\\submission_stage2_gold_gold_recover_base.csv",
+      "gold_recover_market": "results\\submission_stage2_gold_gold_recover_market.csv",
+      "gold_recover_base_a_tier": "results\\submission_stage2_gold_gold_recover_base_a_tier.csv",
+      "gold_recover_market_a_tier": "results\\submission_stage2_gold_gold_recover_market_a_tier.csv",
+      "gold_recover_base_m_ap_removed": "results\\submission_stage2_gold_gold_recover_base_m_ap_removed.csv",
+      "gold_recover_market_m_ap_removed": "results\\submission_stage2_gold_gold_recover_market_m_ap_removed.csv",
+      "gold_recover_base_w_polls_removed": "results\\submission_stage2_gold_gold_recover_base_w_polls_removed.csv",
+      "gold_recover_market_w_polls_removed": "results\\submission_stage2_gold_gold_recover_market_w_polls_removed.csv",
+      "gold_recover_market_direct_only": "results\\submission_stage2_gold_gold_recover_market_direct_only.csv",
+      "gold_recover_market_direct_priority": "results\\submission_stage2_gold_gold_recover_market_direct_priority.csv",
+      "gold_recover_market_injury_only": "results\\submission_stage2_gold_gold_recover_market_injury_only.csv",
+      "gold_recover_market_injury_sharp_only": "results\\submission_stage2_gold_gold_recover_market_injury_sharp_only.csv",
+      "gold_harry_base": "results\\submission_stage2_gold_gold_harry_base.csv",
+      "gold_harry_market": "results\\submission_stage2_gold_gold_harry_market.csv",
+      "gold_harry_market_injury": "results\\submission_stage2_gold_gold_harry_market_injury.csv",
+      "gold_harry_market_injury_sharp": "results\\submission_stage2_gold_gold_harry_market_injury_sharp.csv",
+      "gold_blend_60_40": "results\\submission_stage2_gold_gold_blend_60_40.csv",
+      "gold_blend_market_injury": "results\\submission_stage2_gold_gold_blend_market_injury.csv",
+      "gold_blend_market_injury_sharp": "results\\submission_stage2_gold_gold_blend_market_injury_sharp.csv"
+    },
+    "genders": {
+      "M": {
+        "season": 2026,
+        "rows": 66430,
+        "changed_rows": 40997,
+        "mean_abs_delta": 0.0017514130980132627,
+        "max_abs_delta": 0.031197443362243227,
+        "overlay_submission_only_enabled": true,
+        "overlay_source_profile": "current_default",
+        "injury_applied_rows": 42340,
+        "market_applied_rows": 40,
+        "sharpen_applied_rows": 16,
+        "futures_enabled": false,
+        "submission_profile": "gold_recover_market",
+        "base_model_profile": "gold_lr_recover",
+        "rating_source_profile": "current_default",
+        "overlay_stack": "market_injury_sharp"
+      },
+      "W": {
+        "season": 2026,
+        "rows": 65703,
+        "changed_rows": 64,
+        "mean_abs_delta": 1.7709794335031348e-05,
+        "max_abs_delta": 0.021250000000000005,
+        "overlay_submission_only_enabled": true,
+        "overlay_source_profile": "current_default",
+        "injury_applied_rows": 0,
+        "market_applied_rows": 64,
+        "sharpen_applied_rows": 0,
+        "futures_enabled": false,
+        "submission_profile": "gold_recover_market",
+        "base_model_profile": "gold_lr_recover",
+        "rating_source_profile": "current_default",
+        "overlay_stack": "market_injury_sharp"
+      }
+    },
+    "overlay_guardrail_passed": true,
+    "overlay_mean_abs_delta_m": 0.0017514130980132627,
+    "overlay_mean_abs_delta_w": 1.7709794335031348e-05,
+    "audit_path": "J:\\ide-workspace\\kaggle-ncaa prediction\\results\\submission_stage2_gold_audit.csv"
+  },
+  "official_lb_log_path": "J:\\ide-workspace\\kaggle-ncaa prediction\\results\\official_lb_log.csv",
+  "external_source_inventory_path": "J:\\ide-workspace\\kaggle-ncaa prediction\\results\\external_source_inventory.csv",
+  "external_source_tier_counts": {
+    "A": 4,
+    "B": 2,
+    "C": 1
+  },
+  "legacy_anchor_mean_brier": 0.16532200354598997,
+  "runtime_variance_proxy": {
+    "M_aggressive_5y": 0.18323304578109717,
+    "M_clean_5y": 0.18640066089626534,
+    "W_aggressive_5y": 0.13826687374494964,
+    "W_clean_5y": 0.1390397089983167
+  },
+  "latest_goldshot_metadata": {
+    "latest_goldshot_summary": {
+      "current": "J:\\ide-workspace\\kaggle-ncaa prediction\\results\\submission_stage2_single_final_hc_no_runtime.csv",
+      "candidates": "J:\\ide-workspace\\kaggle-ncaa prediction\\results\\final_market_override_candidates_2026_test.csv",
+      "manual_shortlist": "J:\\ide-workspace\\kaggle-ncaa prediction\\results\\final_manual_override_shortlist_2026_test.csv",
+      "output": "J:\\ide-workspace\\kaggle-ncaa prediction\\results\\submission_stage2_single_final_hc_goldshot_test.csv",
+      "rows": 132133,
+      "auto_applied_rows": 1,
+      "manual_applied_rows": 0,
+      "total_changed_rows": 1,
+      "auto_applied_playin_rows": 1,
+      "auto_applied_round1_rows": 0,
+      "auto_applied_round2_rows": 0,
+      "auto_model_supported_rows": 1,
+      "max_abs_change": 0.1000830648446136,
+      "changed_ids_top10": [
+        {
+          "ID": "2026_3304_3350",
+          "CurrentPred": 0.2870129852505311,
+          "Pred": 0.3870960500951447,
+          "AppliedMode": "auto"
+        }
+      ],
+      "changes_output": "J:\\ide-workspace\\kaggle-ncaa prediction\\results\\submission_stage2_single_final_hc_goldshot_changes_test.csv"
+    },
+    "latest_recommendation": {
+      "recommended_label": "hc_current",
+      "recommended_submission": "J:\\ide-workspace\\kaggle-ncaa prediction\\results\\submission_stage2_single_final_hc_no_runtime.csv",
+      "inputs": {
+        "current": "J:\\ide-workspace\\kaggle-ncaa prediction\\results\\submission_stage2_single_final_hc_no_runtime.csv",
+        "silver": "J:\\ide-workspace\\kaggle-ncaa prediction\\results\\submission_stage2_single_final_hc_silver_runtime.csv",
+        "goldshot": "J:\\ide-workspace\\kaggle-ncaa prediction\\results\\submission_stage2_single_final_hc_goldshot_test.csv",
+        "baseline": "J:\\ide-workspace\\kaggle-ncaa prediction\\submission_stage2_single_final.csv"
+      },
+      "signals": {
+        "goldshot_auto_applied_rows": 1,
+        "goldshot_total_changed_rows": 1,
+        "goldshot_market_model_share": 1.0,
+        "women_runtime_active_rows": 0,
+        "baseline_market_backed_high_priority_rows": 0
+      },
+      "reasons": [
+        "default to current HC candidate"
+      ]
+    }
+  },
+  "market_blend_gender_gap": {
+    "season_dispersion_mean": 0.0009840178851998026,
+    "best_variant_recent_window_brier": 0.167641741395493,
+    "strength_full_vs_base_equal_gender_delta": null,
+    "external_base_pruned_vs_base_equal_gender_delta": 0.0020580028248856075,
+    "strength_recent_vs_base_equal_gender_delta": null
+  }
+}

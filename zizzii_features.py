@@ -1115,6 +1115,7 @@ def build_team_features(
     data_dir: Optional[Path] = None,
     external_dir: Optional[Path] = None,
     elo_params: Optional[dict[str, float]] = None,
+    include_external: bool = True,
 ) -> pd.DataFrame:
     prefix = gender
     compact = read_competition_csv(f"{prefix}RegularSeasonCompactResults.csv", data_dir)
@@ -1210,9 +1211,10 @@ def build_team_features(
     if not coach_df.empty:
         base = base.merge(coach_df, on=["Season", "TeamID"], how="left")
 
-    external_df = load_external_team_features(gender, external_dir, data_dir=data_dir)
-    if not external_df.empty:
-        base = base.merge(external_df, on=["Season", "TeamID"], how="left")
+    if include_external:
+        external_df = load_external_team_features(gender, external_dir, data_dir=data_dir)
+        if not external_df.empty:
+            base = base.merge(external_df, on=["Season", "TeamID"], how="left")
 
     base = base.merge(parse_seeds(seeds_raw), on=["Season", "TeamID"], how="left")
     base["SeedImputed"] = base["SeedNum"].isna().astype(int)
